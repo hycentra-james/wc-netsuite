@@ -1,0 +1,49 @@
+{
+    "shipperZip": "91761",
+    "shipperCountry": "US",
+    "consigneeZip": "82718",
+    "consigneeCountry": "US",
+    "shipmentMode": "LTL",
+    "equipmentType": "Van",
+    "items": [
+        {
+            "productDescription": "Bathroom Vanities - AB30CW03RS-000000000 x1",
+            "class": "125",
+            "pieces": 1,
+            "weight": 226,
+            "isHazardous": false,
+            "packaging": "pallets",
+            "height": 45,
+            "length": 36,
+            "width": 36,
+            "sealNumber": ""
+        }
+    ],
+    "shipperAddress": "701 Auto Center Dr",
+    "shipperName": "homedepot.com",
+    "shipperContact": "Order Department",
+    "shipperEmail": "orders@water-creation.com",
+    "shipperPhone": "(909) 773-1777",
+    "consigneeAddress": "C/O THD Ship to Store #6005",
+    "consigneeAddress2": "1105 E Boxelder Rd",
+    "consigneeName": "Mark Pantalone",
+    "consigneeContact": "Mark Pantalone",
+    "consigneeEmail": "",
+    "consigneePhone": "3076868128",
+    "poReference": "TESTING1234",
+    "billOfLandingNote": "",
+    "pickupDate": "2023-11-23T09:00:00.000-08:00",
+    "pickupOpenTime": "2023-11-23T08:00:00.000-08:00",
+    "pickupCloseTime": "2023-11-23T17:00:00.000-08:00",
+    "estimatedDelivery": "2023-11-23T09:00:00.000-08:00",
+    "estimatedDeliveryOpenTime": "2023-11-23T08:00:00.000-08:00",
+    "estimatedDeliveryCloseTime": "2023-11-23T17:00:00.000-08:00",
+    "shipmentStatus": "Booked",
+    "referenceNumber": "6005",
+    "carrier": {
+        "carrierScac": "PAAF",
+        "providerScac": "",
+        "proNumber": "7894561"
+    },
+    "test": false
+}

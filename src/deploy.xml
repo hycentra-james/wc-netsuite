@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<deploy>
+    <!-- The original deploy.xml
+    <configuration>
+        <path>~/AccountConfiguration/*</path>
+    </configuration>
+    <files>
+        <path>~/FileCabinet/*</path>
+    </files>
+    <objects>
+        <path>~/Objects/*</path>
+    </objects>
+    <translationimports>
+        <path>~/Translations/*</path>
+    </translationimports>
+    -->
+    <!-- This is modified by James -->
+    <objects>
+        <path>~/Objects/*</path>
+    </objects>
+</deploy>

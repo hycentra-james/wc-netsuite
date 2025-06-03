@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="//cdn.shopify.com/s/files/1/0625/4657/5600/t/7/assets/vela-fonts.css?v=97884566218227231121666857757"
+        rel="stylesheet" type="text/css" media="all" />
+    <link rel="icon" href="/core/media/media.nl?id=3899&c=6511399&h=PKzV9fngTN4viJxcOvIAo-RQXpQ8B9jbq7OekevIaj54rBXo" />
+    <title>Water Creation - Customer Application</title>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.3/jquery.min.js">
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery-validation@1.19.5/dist/jquery.validate.min.js">
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery-validation@1.19.5/dist/additional-methods.min.js">
+    </script>
+    <script src="https://www.google.com/recaptcha/api.js?render=6Le1iukkAAAAAK4zioNTjn8Q3ObsmX76p56i2Xye">
+    </script>
+    <script>
+        $(document).ready(function () {            
+            $("input[name='file']").attr('id', 'file');
+
+            $("#main_form").validate({
+                rules: {
+                    companyname: 'required',
+                    address1: 'required',
+                    city: 'required',
+                    state: 'required',
+                    zipcode: 'required',
+                    country: 'required',
+                    custentity_hyc_bizlicenseno: {
+                        required: true,
+                        minlength: 6,
+                        maxlength: 15
+                    },
+                    custentity_hyc_federal_tax_id: {
+                        required: true,
+                        minlength: 9,
+                        maxlength: 9
+                    },
+                    custentity_hyc_resale_cert_no: {
+                        required: true,
+                        minlength: 8,
+                        maxlength: 15
+                    },
+                    file: 'required',
+                    firstname: 'required',
+                    lastname: 'required',
+                    title: 'required',
+                    email: {
+                        required: true,
+                        email: true
+                    },
+                    phone: 'required',
+                    cbAgreeTerms: 'required'
+                },
+                messages: {
+                    companyname: "Please enter your company name",
+                    address1: "Please enter your address",
+                    city: "Please enter your city",
+                    state: "Please select your state",
+                    zipcode: "Please enter your zip code",
+                    country: "Please select your country",
+                    custentity_hyc_bizlicenseno: {
+                        required: "Please enter your business license number",
+                        minlength: "Your business license number must be at least 6 characters long",
+                        maxlength: "Your business license number cannot be longer than 15 characters"
+                    },
+                    custentity_hyc_federal_tax_id: {
+                        required: "Please enter your federal tax ID number",
+                        minlength: "Your federal tax ID number must be exactly 9 digits long",
+                        maxlength: "Your federal tax ID number must be exactly 9 digits long"
+                    },
+                    custentity_hyc_resale_cert_no: {
+                        required: "Please enter your resale certificate number",
+                        minlength: "Your resale certificate number must be at least 8 characters long",
+                        maxlength: "Your resale certificate number cannot be longer than 15 characters"
+                    },
+                    file: "Please upload your resale certificate",
+                    firstname: "Please enter your first name",
+                    lastname: "Please enter your last name",
+                    title: "Please enter your job title", 
+                    email: {
+                        required: "Please enter your email address",
+                        email: "Please enter a valid email address"
+                    },
+                    phone: "Please enter your phone number",
+                    cbAgreeTerms: "Please check, read and agree to the Terms of service and Privacy Policy."
+                },
+                showErrors: function (errorMap, errorList) {
+                    $('input[name="submitted"]').val("");
+                    const btnSubmit = document.getElementById("btnSubmit");
+                    btnSubmit.disabled = false;
+                    this.defaultShowErrors();
+                },
+                submitHandler: function (form) {
+                    const btnSubmit = document.getElementById("btnSubmit");
+                    btnSubmit.disabled = true;
+                    grecaptcha.ready(function () {
+                        grecaptcha.execute('6Le1iukkAAAAAK4zioNTjn8Q3ObsmX76p56i2Xye', { action: 'submit' }).then(function (token) {
+                            if (btnSubmit.disabled) {
+                                document.getElementById("main_form").submit();
+                            }
+                        });
+                    });
+                }
+            });
+        });
+    </script>
+    <style>
+        body {
+            font-family: "Rubik" !important;
+            font-size: 14px !important;
+        }
+
+        textarea {
+            display: block !important;
+            width: 100% !important;
+            height: auto !important;
+            padding: 6px 12px !important;
+            font-size: 14px !important;
+            line-height: 1.42857143 !important;
+            color: #555 !important;
+            background-color: #fff !important;
+            background-image: none !important;
+            border: 1px solid #ccc !important;
+            border-radius: 4px !important;
+            box-shadow: inset 0 1px 1px rgba(0, 0, 0, .075) !important;
+        }
+
+        label.error {
+            color: #ff0000;
+        }
+
+        div.control-group {
+            margin: 5px 0px;
+        }
+
+        div.control-group input {
+            padding: 0px 10px;
+        }
+
+        img.bg-img {
+            min-height: 100%;
+            height: auto;
+            position: fixed;
+            top: 0;
+            right: 0;
+            z-index: 0;
+        }
+
+        legend {
+            margin-top: 15px;
+        }
+
+        input,
+        button,
+        select,
+        textarea {
+            font-family: inherit;
+            font-size: inherit;
+            line-height: inherit;
+        }
+
+        input,
+        select {
+            display: block;
+            width: 100% !important;
+            height: 34px !important;
+            padding: 6px 12px;
+            font-size: 14px !important;
+            line-height: 1.428571429;
+            color: #555555;
+            vertical-align: middle;
+            background-color: #ffffff;
+            background-image: none;
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+            -webkit-box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.075);
+            box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.075);
+            -webkit-transition: border-color ease-in-out .15s, box-shadow ease-in-out .15s;
+            transition: border-color ease-in-out .15s, box-shadow ease-in-out .15s;
+        }
+
+        input:focus,
+        select:focus {
+            border-color: #66afe9;
+            outline: 0;
+            -webkit-box-shadow: inset 0 1px 1px rgba(0, 0, 0, .075), 0 0 8px rgba(102, 175, 233, 0.6);
+            box-shadow: inset 0 1px 1px rgba(0, 0, 0, .075), 0 0 8px rgba(102, 175, 233, 0.6);
+        }
+
+        input:-moz-placeholder {
+            color: #999999;
+        }
+
+        input::-moz-placeholder {
+            color: #999999;
+            opacity: 1;
+        }
+
+        input:-ms-input-placeholder {
+            color: #999999;
+        }
+
+        input::-webkit-input-placeholder {
+            color: #999999;
+        }
+
+        input[disabled],
+        input[readonly],
+        fieldset[disabled] input {
+            cursor: not-allowed;
+            background-color: #eeeeee;
+        }
+
+        textarea {
+            height: auto;
+        }
+
+        button,
+        input,
+        select,
+        textarea {
+            font-family: inherit;
+            font-size: 100%;
+            margin: 0;
+        }
+
+        button,
+        input {
+            line-height: normal;
+        }
+
+        button,
+        select {
+            text-transform: none;
+        }
+
+        button,
+        html input[type="button"],
+        input[type="reset"],
+        input[type="submit"] {
+            -webkit-appearance: button;
+            cursor: pointer;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-action {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-GLhlTQ8iRABdZLl6O3oVMWSktQOp6b7In1Zl3/Jr59b6EGGoI1aFkw7cmDA6j6gD" crossorigin="anonymous">
+    <NLFORM>
+        <div class="container">
+            <div class="row text-center">
+                <div class="col-md-12 mt-3">
+                    <img
+                        src="https://system.na1.netsuite.com/core/media/media.nl?id=3888&c=6511399&h=8FyRyNWoGU9GHoopnceKSi_Q7OeJHM4gWjjzzkNOLEq035ED" />
+                </div>
+                <div class="col-md-12 mt-2">
+                    <h1 class="mb-0">Partner Application
+                    </h1>
+                </div>
+            </div>
+            <form role="form">
+                <!-- Company Info -->
+                <div class="row">
+                    <div class="col-md-12">
+                        <legend>Company Information
+                        </legend>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="companyname">Company name *</label>
+                            <nlcompanyname>
+                            </nlcompanyname>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="email">DBA</label>
+                            <nlcustentity_vl_dba>
+                            </nlcustentity_vl_dba>
+                        </div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="control-group">
+                            <label class="control-label" for="phone">Website URL</label>
+                            <nlurl>
+                            </nlurl>
+                        </div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-12">
+                        <div class="control-group">
+                            <label class="control-label" for="address1">Address Line 1*</label>
+                            <nladdress1>
+                            </nladdress1>
+                        </div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="control-group">
+                            <label class="control-label" for="address2">Address Line 2</label>
+                            <nladdress2>
+                            </nladdress2>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="control-group">
+                            <label class="control-label" for="city">City*</label>
+                            <nlcity>
+                            </nlcity>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="control-group">
+                            <label class="control-label" for="state">State*</label>
+                            <nlstate>
+                            </nlstate>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="control-group">
+                            <label class="control-label" for="zipcode">Zip Code*</label>
+                            <nlzipcode>
+                            </nlzipcode>
+                        </div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="control-group">
+                            <label class="control-label" for="country">Country*</label>
+                            <nlcountry>
+                            </nlcountry>
+                        </div>
+                    </div>
+                </div>
+                <div class="row mt-2" style="height: 30px;"></div>
+                <!-- Company Info [END] -->
+                <!-- Business Credit Info -->
+                <div class="row">
+                    <div class="col-md-12">
+                        <legend>Legal Information
+                        </legend>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="custentity_hyc_bizlicenseno">Business License # *</label>
+                            <nlcustentity_hyc_bizlicenseno>
+                            </nlcustentity_hyc_bizlicenseno>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="custentity_hyc_federal_tax_id">Federal Tax ID *</label>
+                            <nlcustentity_hyc_federal_tax_id>
+                            </nlcustentity_hyc_federal_tax_id>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="custentity_hyc_resale_cert_no">Resale Certificate Number
+                                *</label>
+                            <nlcustentity_hyc_resale_cert_no>
+                            </nlcustentity_hyc_resale_cert_no>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="custentity_hyc_year_of_est">Year of Establishment</label>
+                            <nlcustentity_hyc_year_of_est>
+                            </nlcustentity_hyc_year_of_est>
+                        </div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="control-group">
+                            <label class="control-label" for="file">Resale Certificate *</label>
+                            <nlfile>
+                            </nlfile>
+                        </div>
+                    </div>
+                </div>
+                <div class="row mt-2" style="height: 30px;"></div>
+                <!-- Business Credit Info [END] -->
+                <!-- Contact Info -->
+                <div class="row">
+                    <div class="col-md-12">
+                        <legend>Contact Information
+                        </legend>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="firstname">First name *</label>
+                            <nlfirstname>
+                            </nlfirstname>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="lastname">Last name *</label>
+                            <nllastname>
+                            </nllastname>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="title">Job Title *</label>
+                            <nltitle>
+                            </nltitle>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="email">Email *</label>
+                            <nlemail>
+                            </nlemail>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="control-group">
+                            <label class="control-label" for="phone">Phone*</label>
+                            <nlphone>
+                            </nlphone>
+                        </div>
+                    </div>
+                    <div class="col-md-12">
+                        <div class="col-md-12">
+                            <div class="control-group">
+                                <input type="checkbox" id="cbAgreeTerms" name="cbAgreeTerms" value="agree" style="
+                                display: inline-block;
+                                margin: 3px 3px 3px 4px;
+                                width: 15px !important;
+                                height: 15px !important;">
+                                <label for="cbAgreeTerms">By checking this box, I confirm that I have read and agree to the <a href="https://water-creation.com/policies/terms-of-service" target="_blank">Terms of service</a> and <a href="https://water-creation.com/policies/privacy-policy" target="_blank">Privacy Policy</a>.</label>
+                            </div>
+                        </div>
+                        <div class="form-action">
+                            <label class="control-label" for="Subsidiary"></label>
+                            <nlsubsidiary>
+                            </nlsubsidiary>
+                            <button id="btnSubmit" type="submit" class="btn btn-dark col-12">Apply
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <!-- Contact Info [END] -->
+            </form>
+            <div class="row mt-3">
+                <div class="col-md-6 text-start">© Water Creation
+                </div>
+                <div class="col-md-6 text-end">* Required fields
+                </div>
+            </div>
+        </div>
+    </NLFORM>
+</body>
+
+</html>
