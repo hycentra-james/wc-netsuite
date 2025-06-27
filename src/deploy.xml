@@ -16,6 +16,6 @@
     -->
     <!-- This is modified by James -->
     <objects>
-        <path>~/Objects/*</path>
+        <path>~/Objects/faq/*</path>
     </objects>
 </deploy>
