@@ -92,7 +92,7 @@ define(['N/record', 'N/log', 'N/search'],
             }
 
             // If there's no item info, we'll reset the item info
-            resetItemInfo(currentRecord, false);
+            // resetItemInfo(currentRecord, false);
         }
 
         function populateItemInfo(orderId, itemId, currentRecord) {
@@ -148,7 +148,7 @@ define(['N/record', 'N/log', 'N/search'],
             }
 
             // If there's no item info, we'll reset the item info
-            resetItemInfo(currentRecord, true);
+            // resetItemInfo(currentRecord, true);
         }
 
         function resetItemInfo(currentRecord, showAlert) {
