@@ -43,7 +43,7 @@ define(['N/record', 'N/log', 'N/search'],
                             ['custbody_customer_order_number', search.Operator.IS, lookupVal]
                         ],
                         'and',
-                        ['datecreated', search.Operator.ONORAFTER, 'daysago400'], // Only look for orders with 180 days to improve performance
+                        ['datecreated', search.Operator.ONORAFTER, 'daysago730'], // Only look for orders with 180 days to improve performance
                     ],
                     columns: ['internalid',
                         'tranid', // SO Number
@@ -80,11 +80,22 @@ define(['N/record', 'N/log', 'N/search'],
                 // If Item Fulfillment record exists and only have one item record, we'll auto fill those info
                 if (itemFulfillmentRS && itemFulfillmentRS.length == 1) {
                     var itemId = itemFulfillmentRS[0].getValue({ name: 'item' });
-                    currentRecord.setValue({
-                        fieldId: 'custrecord_hyc_sqi_issue_item',
-                        value: itemId
-                    });
-                    populateItemInfo(orderId, itemId, currentRecord);
+                    // Source the issue item from the Item Fulfillment record
+                    var issueItemId = getMemberItemWithMatchingCategory(itemId);
+
+                    // If the Kit member is found, we'll use the kit member item as the issue item
+                    if (issueItemId) {
+                        currentRecord.setValue({
+                            fieldId: 'custrecord_hyc_sqi_issue_item',
+                            value: issueItemId
+                        });
+                    } else {
+                        currentRecord.setValue({
+                            fieldId: 'custrecord_hyc_sqi_issue_item',
+                            value: itemId
+                        });
+                    }
+                    populateItemInfo(orderId, itemId, issueItemId, currentRecord);
 
                     // Assume we've found the item info, so we'll return
                     return;
@@ -95,7 +106,7 @@ define(['N/record', 'N/log', 'N/search'],
             // resetItemInfo(currentRecord, false);
         }
 
-        function populateItemInfo(orderId, itemId, currentRecord) {
+        function populateItemInfo(orderId, itemId, issueItemId, currentRecord) {
             try {
                 // Look up the Item Fulfillment record
                 var itemFulfillmentSearch = search.create({
@@ -138,6 +149,20 @@ define(['N/record', 'N/log', 'N/search'],
                                 value: purchaseOrderRS[0].getValue({ name: 'entity' })
                             });
                         }
+
+                        // Lookup the Item unit cost from PO line item
+                        var lookupItemId = issueItemId || itemId; // Use issueItemId if available, otherwise use itemId
+                        var unitCost = getItemUnitCostFromPO(poNumberLookup, lookupItemId);
+                        
+                        if (unitCost !== null) {
+                            log.debug('populateItemInfo', 'Found unit cost: ' + unitCost + ' for item: ' + lookupItemId);
+                            currentRecord.setValue({
+                                fieldId: 'custrecord_hyc_sqi_issue_item_unit_cost',
+                                value: unitCost
+                            });
+                        } else {
+                            log.debug('populateItemInfo', 'No unit cost found for item: ' + lookupItemId + ' in PO: ' + poNumberLookup);
+                        }
                     }
 
                     // Assume we've found the item info, so we'll return
@@ -170,12 +195,143 @@ define(['N/record', 'N/log', 'N/search'],
             }
         }
 
+        function getItemUnitCostFromPO(poNumber, itemId) {
+            try {
+                if (!poNumber || !itemId) {
+                    log.debug('getItemUnitCostFromPO', 'Missing PO number or item ID');
+                    return null;
+                }
+
+                // Search for the Purchase Order line items
+                var poLineSearch = search.create({
+                    type: search.Type.PURCHASE_ORDER,
+                    filters: [
+                        ['type', search.Operator.ANYOF, 'PurchOrd'],
+                        'and',
+                        ['tranid', search.Operator.IS, poNumber],
+                        'and',
+                        ['item', search.Operator.ANYOF, itemId],
+                        'and',
+                        ['mainline', search.Operator.IS, 'F'], // Line level records only
+                        'and',
+                        ['taxline', search.Operator.IS, 'F'] // Exclude tax lines
+                    ],
+                    columns: [
+                        'item',
+                        'rate', // Unit cost
+                        'amount',
+                        'quantity'
+                    ]
+                });
+
+                var poLineResults = poLineSearch.run().getRange({ start: 0, end: 1 });
+
+                if (poLineResults && poLineResults.length > 0) {
+                    var unitCost = poLineResults[0].getValue({ name: 'rate' });
+                    log.debug('getItemUnitCostFromPO', 'Found unit cost: ' + unitCost + ' for item: ' + itemId + ' in PO: ' + poNumber);
+                    return parseFloat(unitCost) || 0;
+                } else {
+                    log.debug('getItemUnitCostFromPO', 'No line item found for item: ' + itemId + ' in PO: ' + poNumber);
+                    return null;
+                }
+
+            } catch (e) {
+                log.error('getItemUnitCostFromPO Error', e.message);
+                return null;
+            }
+        }
+
+        function getMemberItemWithMatchingCategory(kitItemId) {
+            try {
+                if (!kitItemId) {
+                    log.debug('getMemberItemWithMatchingCategory', 'No kit item ID provided');
+                    return null;
+                }
+
+                // First, get the kit item's product category (class)
+                var kitItemRecord = record.load({
+                    type: record.Type.KIT_ITEM,
+                    id: kitItemId,
+                    isDynamic: false
+                });
+
+                var kitProductCategory = kitItemRecord.getValue({ fieldId: 'class' });
+                log.debug('getMemberItemWithMatchingCategory', 'Kit product category: ' + kitProductCategory);
+
+                if (!kitProductCategory) {
+                    log.debug('getMemberItemWithMatchingCategory', 'Kit item has no product category');
+                    return null;
+                }
+
+                // Get the number of member items in the kit
+                var memberItemCount = kitItemRecord.getLineCount({ sublistId: 'member' });
+                log.debug('getMemberItemWithMatchingCategory', 'Member item count: ' + memberItemCount);
+
+                // Loop through all member items
+                for (var i = 0; i < memberItemCount; i++) {
+                    var memberItemId = kitItemRecord.getSublistValue({
+                        sublistId: 'member',
+                        fieldId: 'item',
+                        line: i
+                    });
+
+                    if (memberItemId) {
+                        // Load the member item to get its product category
+                        try {
+                            var memberItemRecord = record.load({
+                                type: record.Type.INVENTORY_ITEM, // Assuming most members are inventory items
+                                id: memberItemId,
+                                isDynamic: false
+                            });
+
+                            var memberProductCategory = memberItemRecord.getValue({ fieldId: 'class' });
+                            log.debug('getMemberItemWithMatchingCategory', 'Member item ' + memberItemId + ' category: ' + memberProductCategory);
+
+                            // Check if the member item's category matches the kit's category
+                            if (memberProductCategory && memberProductCategory == kitProductCategory) {
+                                log.debug('getMemberItemWithMatchingCategory', 'Found matching member item: ' + memberItemId);
+                                return memberItemId;
+                            }
+                        } catch (memberLoadError) {
+                            // If loading as INVENTORY_ITEM fails, try other item types
+                            try {
+                                var memberItemRecord = record.load({
+                                    type: record.Type.NON_INVENTORY_ITEM,
+                                    id: memberItemId,
+                                    isDynamic: false
+                                });
+
+                                var memberProductCategory = memberItemRecord.getValue({ fieldId: 'class' });
+                                log.debug('getMemberItemWithMatchingCategory', 'Member item (non-inv) ' + memberItemId + ' category: ' + memberProductCategory);
+
+                                if (memberProductCategory && memberProductCategory == kitProductCategory) {
+                                    log.debug('getMemberItemWithMatchingCategory', 'Found matching member item: ' + memberItemId);
+                                    return memberItemId;
+                                }
+                            } catch (secondLoadError) {
+                                log.debug('getMemberItemWithMatchingCategory', 'Could not load member item ' + memberItemId + ': ' + secondLoadError.message);
+                            }
+                        }
+                    }
+                }
+
+                log.debug('getMemberItemWithMatchingCategory', 'No matching member item found');
+                return null;
+
+            } catch (e) {
+                log.error('getMemberItemWithMatchingCategory Error', e.message);
+                return null;
+            }
+        }
+
         return {
             populateOrder: populateOrder,
             searchSalesOrder: searchSalesOrder,
             tryPopulateSingleItemOrder: tryPopulateSingleItemOrder,
             populateItemInfo: populateItemInfo,
-            resetItemInfo: resetItemInfo
+            resetItemInfo: resetItemInfo,
+            getMemberItemWithMatchingCategory: getMemberItemWithMatchingCategory,
+            getItemUnitCostFromPO: getItemUnitCostFromPO
         }
     }
 );
