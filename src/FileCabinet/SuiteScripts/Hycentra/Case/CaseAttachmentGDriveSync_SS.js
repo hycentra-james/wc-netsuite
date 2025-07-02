@@ -12,8 +12,9 @@ define([
     'N/runtime',
     'N/crypto',
     'N/encode',
-    'N/task'
-], function (search, record, log, file, https, runtime, crypto, encode, task) {
+    'N/task',
+    'N/format'
+], function (search, record, log, file, https, runtime, crypto, encode, task, format) {
 
     // ────────────────────────────
     // CONSTANTS
@@ -111,10 +112,10 @@ define([
             for (var i = 0; i < eligibleCases.length; i++) {
                 try {
                     var caseData = eligibleCases[i];
-                    log.debug('Processing Case', 'Case ID: ' + caseData.id + ', Case Number: ' + caseData.casenumber);
+                    log.debug('Processing Case', 'Case ID: ' + caseData.id + ', Case Number: ' + caseData.casenumber + ', Created Date: ' + caseData.createddate);
 
                     // Step 2: Create folder in Google Drive
-                    var folderResult = createGoogleDriveFolder(caseData.casenumber, parentFolderId, accessToken);
+                    var folderResult = createGoogleDriveFolder(caseData.casenumber, caseData.createddate, parentFolderId, accessToken);
                     
                     if (folderResult.success) {
                         // Step 3: Process case attachments
@@ -306,6 +307,7 @@ define([
                     'internalid',
                     'casenumber',
                     'title',
+                    'createddate',
                     'custevent_hyc_sqi_gdrive_upload_status'
                 ]
             });
@@ -318,7 +320,8 @@ define([
                 cases.push({
                     id: resultRange[i].getValue('internalid'),
                     casenumber: resultRange[i].getValue('casenumber'),
-                    title: resultRange[i].getValue('title')
+                    title: resultRange[i].getValue('title'),
+                    createddate: resultRange[i].getValue('createddate')
                 });
             }
 
@@ -359,38 +362,41 @@ define([
             return false;
         }
     }
-    function createGoogleDriveFolder(caseNumber, parentFolderId, accessToken) {
+
+    function createGoogleDriveFolder(caseNumber, createdDate, parentFolderId, accessToken) {
         try {
-            // Check if folder already exists
-            var existingFolder = checkFolderExists(caseNumber, parentFolderId, accessToken);
-            if (existingFolder) {
-                return { success: true, folderId: existingFolder };
+            var caseCreationDate = new Date(createdDate);
+
+            var year = caseCreationDate.getFullYear().toString();
+            var month = ('0' + (caseCreationDate.getMonth() + 1)).slice(-2);
+
+            log.debug('Folder Structure', 'Year: ' + year + ', Month: ' + month);
+
+            // 1. Get or create Year folder
+            var yearFolderResult = getOrCreateFolder(year, parentFolderId, accessToken);
+            if (!yearFolderResult.success) {
+                return { success: false, error: yearFolderResult.error };
             }
+            var yearFolderId = yearFolderResult.folderId;
+            log.debug('Year Folder', 'Year Folder ID: ' + yearFolderId);
 
-            // Create new folder
-            var folderMetadata = {
-                name: caseNumber,
-                parents: [parentFolderId],
-                mimeType: 'application/vnd.google-apps.folder'
-            };
-
-            var response = https.post({
-                url: GOOGLE_DRIVE_API_URL + '/files?supportsAllDrives=true',
-                headers: {
-                    'Authorization': 'Bearer ' + accessToken,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(folderMetadata)
-            });
-
-            if (response.code === 200) {
-                var folderData = JSON.parse(response.body);
-                log.debug('Folder Created', 'Created folder: ' + folderData.id + ' for case: ' + caseNumber);
-                return { success: true, folderId: folderData.id };
-            } else {
-                log.error('Folder Creation Failed', 'Response: ' + response.body);
-                return { success: false, error: response.body };
+            // 2. Get or create Month folder within Year folder
+            var monthFolderResult = getOrCreateFolder(month, yearFolderId, accessToken);
+            if (!monthFolderResult.success) {
+                return { success: false, error: monthFolderResult.error };
             }
+            var monthFolderId = monthFolderResult.folderId;
+            log.debug('Month Folder', 'Month Folder ID: ' + monthFolderId);
+
+            // 3. Get or create Case Number folder within Month folder
+            var caseFolderResult = getOrCreateFolder(caseNumber, monthFolderId, accessToken);
+            if (!caseFolderResult.success) {
+                return { success: false, error: caseFolderResult.error };
+            }
+            var caseFolderId = caseFolderResult.folderId;
+            log.debug('Case Folder', 'Case Folder ID: ' + caseFolderId);
+
+            return { success: true, folderId: caseFolderId };
 
         } catch (e) {
             log.error('createGoogleDriveFolder Error', e.message);
@@ -398,9 +404,54 @@ define([
         }
     }
 
-    function checkFolderExists(caseNumber, parentFolderId, accessToken) {
+    function getOrCreateFolder(folderName, parentId, accessToken) {
         try {
-            var query = "name='" + caseNumber + "' and parents in '" + parentFolderId + "' and mimeType='application/vnd.google-apps.folder'";
+            var folderId = checkFolderExists(folderName, parentId, accessToken);
+            if (folderId) {
+                log.debug('getOrCreateFolder', 'Folder already exists: ' + folderName + ' ID: ' + folderId);
+                return { success: true, folderId: folderId };
+            }
+
+            // Folder does not exist, create it
+            var createUrl = GOOGLE_DRIVE_API_URL + '/files';
+            var headers = {
+                'Authorization': 'Bearer ' + accessToken,
+                'Content-Type': 'application/json'
+            };
+            var postBody = JSON.stringify({
+                name: folderName,
+                mimeType: 'application/vnd.google-apps.folder',
+                parents: [parentId]
+            });
+
+            log.debug('Creating Folder', 'Folder Name: ' + folderName + ', Parent ID: ' + parentId);
+
+            var response = https.post({
+                url: createUrl + '?supportsAllDrives=true',
+                headers: headers,
+                body: postBody
+            });
+
+            log.debug('Create Folder Response', 'Status: ' + response.code + ', Body: ' + response.body);
+
+            if (response.code === 200) {
+                var responseBody = JSON.parse(response.body);
+                log.audit('Folder Creation Success', 'Successfully created folder: ' + folderName + ' with ID: ' + responseBody.id);
+                return { success: true, folderId: responseBody.id };
+            } else {
+                var errorMsg = 'Failed to create folder ' + folderName + ': HTTP ' + response.code + ' - ' + response.body;
+                log.error('Folder Creation Failed', errorMsg);
+                return { success: false, error: errorMsg };
+            }
+        } catch (e) {
+            log.error('getOrCreateFolder Error', e.message);
+            return { success: false, error: e.message };
+        }
+    }
+
+    function checkFolderExists(folderName, parentId, accessToken) {
+        try {
+            var query = "name='" + folderName + "' and parents in '" + parentId + "' and mimeType='application/vnd.google-apps.folder'";
             
             var response = https.get({
                 url: GOOGLE_DRIVE_API_URL + '/files?q=' + encodeURIComponent(query) + '&supportsAllDrives=true',
@@ -466,7 +517,7 @@ define([
     function getMessageAttachments(caseId) {
         try {
             log.debug('getMessageAttachments', 'Attempting to load attachments record for case: ' + caseId);
-
+    
             const messageSearchColAttachmentsInternalId = search.createColumn({ name: 'internalid', join: 'attachments' });
             const messageSearchColAttachmentsFolder = search.createColumn({ name: 'folder', join: 'attachments' });
             const messageSearchColAttachmentsHostedPath = search.createColumn({ name: 'hostedpath', join: 'attachments' });
@@ -475,7 +526,7 @@ define([
             const messageSearchColAttachmentsSizeKB = search.createColumn({ name: 'documentsize', join: 'attachments' });
             const messageSearchColAttachmentsType = search.createColumn({ name: 'filetype', join: 'attachments' });
             const messageSearchColAttachmentsURL = search.createColumn({ name: 'url', join: 'attachments' });
-
+    
             // Load the message record to get attachments
             var attachmentRecords = search.create({
                 type: search.Type.MESSAGE,
@@ -489,16 +540,16 @@ define([
                     messageSearchColAttachmentsSizeKB
                 ]
              });
-
+    
             var attachments = [];
-
+    
             var attachmentResults = attachmentRecords.run().getRange({ start: 0, end: 1000 });
             var fileCount = attachmentResults.length;
             log.debug('getMessageAttachments', 'Found ' + fileCount + ' messages for case: ' + caseId);
-
+    
             for (var i = 0; i < fileCount; i++) {
                 var fileId = attachmentResults[i].getValue({name: 'internalid', join: 'attachments'});
-
+    
                 if (fileId) {
                     log.debug('getMessageAttachments', 'Found fileId: ' + fileId + ' on line: ' + i + ' for case: ' + caseId);
                     var fileObj = file.load({ id: fileId });
@@ -513,10 +564,10 @@ define([
                     log.debug('getMessageAttachments', 'No fileId found on line: ' + i + ' for case: ' + caseId);
                 }
             }
-
+    
             log.debug('getMessageAttachments', 'Total attachments found for case ' + caseId + ': ' + attachments.length);
             return attachments;
-
+    
         } catch (e) {
             log.error('getMessageAttachments Error', 'Case ID: ' + caseId + ', Error: ' + e.message);
             return [];
@@ -617,4 +668,4 @@ define([
     return {
         execute: execute
     };
-}); 
+});
