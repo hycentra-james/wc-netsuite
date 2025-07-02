@@ -365,52 +365,80 @@ define([
 
     function createGoogleDriveFolder(caseNumber, createdDate, parentFolderId, accessToken) {
         try {
+            log.audit('createGoogleDriveFolder', 'Starting folder creation for case: ' + caseNumber + ', Created Date: ' + createdDate);
+            
             var caseCreationDate = new Date(createdDate);
 
             var year = caseCreationDate.getFullYear().toString();
             var month = ('0' + (caseCreationDate.getMonth() + 1)).slice(-2);
 
-            log.debug('Folder Structure', 'Year: ' + year + ', Month: ' + month);
+            log.debug('Folder Structure', 'Year: ' + year + ', Month: ' + month + ', Case: ' + caseNumber);
+
+            // List existing folders in root for debugging
+            log.debug('Root Folder Contents', 'Listing existing folders in root parent: ' + parentFolderId);
+            listAllFoldersInParent(parentFolderId, accessToken, 'DEBUG');
 
             // 1. Get or create Year folder
+            log.debug('Step 1', 'Processing Year folder: ' + year);
             var yearFolderResult = getOrCreateFolder(year, parentFolderId, accessToken);
             if (!yearFolderResult.success) {
-                return { success: false, error: yearFolderResult.error };
+                return { success: false, error: 'Failed to create/find year folder: ' + yearFolderResult.error };
             }
             var yearFolderId = yearFolderResult.folderId;
-            log.debug('Year Folder', 'Year Folder ID: ' + yearFolderId);
+            log.audit('Year Folder', 'Year Folder ID: ' + yearFolderId);
+
+            // List existing folders in year folder for debugging
+            log.debug('Year Folder Contents', 'Listing existing folders in year folder: ' + yearFolderId);
+            listAllFoldersInParent(yearFolderId, accessToken, 'DEBUG');
 
             // 2. Get or create Month folder within Year folder
+            log.debug('Step 2', 'Processing Month folder: ' + month + ' in year folder: ' + yearFolderId);
             var monthFolderResult = getOrCreateFolder(month, yearFolderId, accessToken);
             if (!monthFolderResult.success) {
-                return { success: false, error: monthFolderResult.error };
+                return { success: false, error: 'Failed to create/find month folder: ' + monthFolderResult.error };
             }
             var monthFolderId = monthFolderResult.folderId;
-            log.debug('Month Folder', 'Month Folder ID: ' + monthFolderId);
+            log.audit('Month Folder', 'Month Folder ID: ' + monthFolderId);
+
+            // List existing folders in month folder for debugging
+            log.debug('Month Folder Contents', 'Listing existing folders in month folder: ' + monthFolderId);
+            listAllFoldersInParent(monthFolderId, accessToken, 'DEBUG');
 
             // 3. Get or create Case Number folder within Month folder
+            log.debug('Step 3', 'Processing Case folder: ' + caseNumber + ' in month folder: ' + monthFolderId);
             var caseFolderResult = getOrCreateFolder(caseNumber, monthFolderId, accessToken);
             if (!caseFolderResult.success) {
-                return { success: false, error: caseFolderResult.error };
+                return { success: false, error: 'Failed to create/find case folder: ' + caseFolderResult.error };
             }
             var caseFolderId = caseFolderResult.folderId;
-            log.debug('Case Folder', 'Case Folder ID: ' + caseFolderId);
+            log.audit('Case Folder', 'Case Folder ID: ' + caseFolderId);
 
+            // Final verification - list contents of the final case folder
+            log.debug('Case Folder Contents', 'Listing contents of final case folder: ' + caseFolderId);
+            listAllFoldersInParent(caseFolderId, accessToken, 'DEBUG');
+
+            log.audit('createGoogleDriveFolder Success', 'Successfully created/found folder structure for case ' + caseNumber + ': ' + parentFolderId + '/' + year + '/' + month + '/' + caseNumber + ' (ID: ' + caseFolderId + ')');
+            
             return { success: true, folderId: caseFolderId };
 
         } catch (e) {
-            log.error('createGoogleDriveFolder Error', e.message);
+            log.error('createGoogleDriveFolder Error', 'Error creating folder structure for case ' + caseNumber + ': ' + e.message);
             return { success: false, error: e.message };
         }
     }
 
     function getOrCreateFolder(folderName, parentId, accessToken) {
         try {
+            log.debug('getOrCreateFolder', 'Processing folder: "' + folderName + '" in parent: ' + parentId);
+            
+            // First, check if folder already exists
             var folderId = checkFolderExists(folderName, parentId, accessToken);
             if (folderId) {
-                log.debug('getOrCreateFolder', 'Folder already exists: ' + folderName + ' ID: ' + folderId);
+                log.audit('getOrCreateFolder', 'Using existing folder: "' + folderName + '" with ID: ' + folderId);
                 return { success: true, folderId: folderId };
             }
+
+            log.debug('getOrCreateFolder', 'Folder does not exist, creating new folder: "' + folderName + '"');
 
             // Folder does not exist, create it
             var createUrl = GOOGLE_DRIVE_API_URL + '/files';
@@ -424,7 +452,7 @@ define([
                 parents: [parentId]
             });
 
-            log.debug('Creating Folder', 'Folder Name: ' + folderName + ', Parent ID: ' + parentId);
+            log.debug('Creating Folder', 'Request Body: ' + postBody);
 
             var response = https.post({
                 url: createUrl + '?supportsAllDrives=true',
@@ -436,25 +464,106 @@ define([
 
             if (response.code === 200) {
                 var responseBody = JSON.parse(response.body);
-                log.audit('Folder Creation Success', 'Successfully created folder: ' + folderName + ' with ID: ' + responseBody.id);
+                log.audit('Folder Creation Success', 'Successfully created folder: "' + folderName + '" with ID: ' + responseBody.id + ' in parent: ' + parentId);
+                
+                // Double-check that the folder was actually created by searching for it again
+                var verifyId = checkFolderExists(folderName, parentId, accessToken);
+                if (verifyId && verifyId === responseBody.id) {
+                    log.debug('Folder Verification', 'Verified folder creation: ' + responseBody.id);
+                } else if (verifyId && verifyId !== responseBody.id) {
+                    log.warn('Folder Verification', 'Found different folder ID during verification. Created: ' + responseBody.id + ', Found: ' + verifyId + '. Using created folder ID.');
+                } else {
+                    log.warn('Folder Verification', 'Could not verify folder creation, but proceeding with created folder ID: ' + responseBody.id);
+                }
+                
                 return { success: true, folderId: responseBody.id };
             } else {
-                var errorMsg = 'Failed to create folder ' + folderName + ': HTTP ' + response.code + ' - ' + response.body;
+                var errorMsg = 'Failed to create folder "' + folderName + '": HTTP ' + response.code + ' - ' + response.body;
                 log.error('Folder Creation Failed', errorMsg);
+                
+                // Check if the folder might have been created by another process in the meantime
+                log.debug('Retry Check', 'Checking if folder was created by another process...');
+                var retryFolderId = checkFolderExists(folderName, parentId, accessToken);
+                if (retryFolderId) {
+                    log.audit('Folder Found on Retry', 'Found folder "' + folderName + '" with ID: ' + retryFolderId + ' (likely created by concurrent process)');
+                    return { success: true, folderId: retryFolderId };
+                }
+                
                 return { success: false, error: errorMsg };
             }
         } catch (e) {
-            log.error('getOrCreateFolder Error', e.message);
+            log.error('getOrCreateFolder Error', 'Error processing folder "' + folderName + '": ' + e.message);
+            
+            // As a last resort, try to find the folder again in case it was created during the error
+            try {
+                var emergencyFolderId = checkFolderExists(folderName, parentId, accessToken);
+                if (emergencyFolderId) {
+                    log.audit('Emergency Recovery', 'Found folder "' + folderName + '" with ID: ' + emergencyFolderId + ' during error recovery');
+                    return { success: true, folderId: emergencyFolderId };
+                }
+            } catch (recoveryError) {
+                log.error('Emergency Recovery Failed', 'Could not recover folder during error: ' + recoveryError.message);
+            }
+            
             return { success: false, error: e.message };
         }
     }
 
     function checkFolderExists(folderName, parentId, accessToken) {
         try {
-            var query = "name='" + folderName + "' and parents in '" + parentId + "' and mimeType='application/vnd.google-apps.folder'";
+            log.debug('checkFolderExists', 'Searching for folder: "' + folderName + '" in parent: ' + parentId);
+            
+            // Escape single quotes in folder name for the query
+            var escapedFolderName = folderName.replace(/'/g, "\\'");
+            var query = "name='" + escapedFolderName + "' and parents in '" + parentId + "' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+            
+            log.debug('checkFolderExists', 'Google Drive Query: ' + query);
+
+            var response = https.get({
+                url: GOOGLE_DRIVE_API_URL + '/files?q=' + encodeURIComponent(query) + '&supportsAllDrives=true&includeItemsFromAllDrives=true',
+                headers: {
+                    'Authorization': 'Bearer ' + accessToken
+                }
+            });
+
+            log.debug('checkFolderExists Response', 'Status: ' + response.code + ', Body: ' + response.body);
+
+            if (response.code === 200) {
+                var data = JSON.parse(response.body);
+                if (data.files && data.files.length > 0) {
+                    var existingFolder = data.files[0];
+                    log.audit('Folder Found', 'Existing folder "' + folderName + '" found with ID: ' + existingFolder.id);
+                    
+                    // If multiple folders with same name exist, log a warning
+                    if (data.files.length > 1) {
+                        log.warn('Multiple Folders Found', 'Found ' + data.files.length + ' folders named "' + folderName + '" in parent ' + parentId + '. Using first one: ' + existingFolder.id);
+                    }
+                    
+                    return existingFolder.id;
+                } else {
+                    log.debug('checkFolderExists', 'No existing folder found with name: "' + folderName + '" in parent: ' + parentId);
+                    return null;
+                }
+            } else {
+                log.error('checkFolderExists API Error', 'HTTP ' + response.code + ' - Response: ' + response.body);
+                return null;
+            }
+
+        } catch (e) {
+            log.error('checkFolderExists Error', 'Error searching for folder "' + folderName + '": ' + e.message);
+            return null;
+        }
+    }
+
+    // Helper function to list all folders in a parent directory for debugging
+    function listAllFoldersInParent(parentId, accessToken, logLevel) {
+        try {
+            logLevel = logLevel || 'DEBUG'; // Default to DEBUG level
+            
+            var query = "parents in '" + parentId + "' and mimeType='application/vnd.google-apps.folder' and trashed=false";
             
             var response = https.get({
-                url: GOOGLE_DRIVE_API_URL + '/files?q=' + encodeURIComponent(query) + '&supportsAllDrives=true',
+                url: GOOGLE_DRIVE_API_URL + '/files?q=' + encodeURIComponent(query) + '&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,createdTime,modifiedTime)',
                 headers: {
                     'Authorization': 'Bearer ' + accessToken
                 }
@@ -463,14 +572,35 @@ define([
             if (response.code === 200) {
                 var data = JSON.parse(response.body);
                 if (data.files && data.files.length > 0) {
-                    return data.files[0].id;
+                    var folderList = [];
+                    for (var i = 0; i < data.files.length; i++) {
+                        var folder = data.files[i];
+                        folderList.push('Name: "' + folder.name + '", ID: ' + folder.id + ', Created: ' + folder.createdTime);
+                    }
+                    
+                    if (logLevel === 'AUDIT') {
+                        log.audit('Existing Folders in Parent ' + parentId, 'Found ' + data.files.length + ' folders: ' + folderList.join(' | '));
+                    } else {
+                        log.debug('Existing Folders in Parent ' + parentId, 'Found ' + data.files.length + ' folders: ' + folderList.join(' | '));
+                    }
+                    
+                    return data.files;
+                } else {
+                    if (logLevel === 'AUDIT') {
+                        log.audit('Existing Folders in Parent ' + parentId, 'No folders found');
+                    } else {
+                        log.debug('Existing Folders in Parent ' + parentId, 'No folders found');
+                    }
+                    return [];
                 }
+            } else {
+                log.error('listAllFoldersInParent API Error', 'HTTP ' + response.code + ' - Response: ' + response.body);
+                return [];
             }
-            return null;
 
         } catch (e) {
-            log.error('checkFolderExists Error', e.message);
-            return null;
+            log.error('listAllFoldersInParent Error', 'Error listing folders in parent ' + parentId + ': ' + e.message);
+            return [];
         }
     }
 
