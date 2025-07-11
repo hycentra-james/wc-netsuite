@@ -208,7 +208,11 @@ define(['N/record', 'N/log', 'N/search'],
                     filters: [
                         ['type', search.Operator.ANYOF, 'PurchOrd'],
                         'and',
-                        ['tranid', search.Operator.IS, poNumber],
+                        [
+                            ['tranid', search.Operator.IS, poNumber],
+                            'or',
+                            ['internalid', search.Operator.ANYOF, poNumber]
+                        ],
                         'and',
                         ['item', search.Operator.ANYOF, itemId],
                         'and',
