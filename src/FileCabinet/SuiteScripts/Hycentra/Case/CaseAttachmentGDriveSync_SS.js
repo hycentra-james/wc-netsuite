@@ -623,7 +623,7 @@ define([
                 checkGovernance();
 
                 // Check if file type is supported
-                if (isSupportedFileType(attachment.type)) {
+                if (isSupportedFileType(attachment.type, attachment.name)) {
                     var uploadResult = uploadFileToGoogleDrive(attachment, folderId, accessToken);
                     if (uploadResult.success) {
                         uploadedCount++;
@@ -704,14 +704,70 @@ define([
         }
     }
 
-    function isSupportedFileType(fileType) {
-        return SUPPORTED_TYPES.indexOf(fileType) !== -1;
+    function isSupportedFileType(fileType, fileName) {
+        // Check if file type is in the supported types list
+        if (SUPPORTED_TYPES.indexOf(fileType) !== -1) {
+            return true;
+        }
+        
+        // Check for specific file extensions that NetSuite might misidentify
+        if (fileName) {
+            var fileExtension = fileName.toLowerCase().substring(fileName.lastIndexOf('.') + 1);
+            
+            log.debug('File Extension', 'File Name: ' + fileName + ', File Extension: ' + fileExtension);
+
+            // Support .mp4 files even if NetSuite identifies them as "Other Binary File"
+            if (fileExtension === 'mp4') {
+                log.debug('File Type Override', 'Supporting .mp4 file: ' + fileName + ' (NetSuite type: ' + fileType + ')');
+                return true;
+            }
+            
+            // Add other extensions here if needed in the future
+            // if (fileExtension === 'mov' || fileExtension === 'avi') {
+            //     return true;
+            // }
+        }
+        
+        return false;
+    }
+
+    function getMimeTypeForFile(fileType, fileName) {
+        // First, check if we have a direct mapping for the NetSuite file type
+        if (MIME_TYPE_MAP[fileType]) {
+            return MIME_TYPE_MAP[fileType];
+        }
+        
+        // If no direct mapping, check file extension for special cases
+        if (fileName) {
+            var fileExtension = fileName.toLowerCase().substring(fileName.lastIndexOf('.') + 1);
+            
+            // Handle .mp4 files that NetSuite might misidentify
+            if (fileExtension === 'mp4') {
+                log.debug('MIME Type Override', 'Using video/mp4 for file: ' + fileName + ' (NetSuite type: ' + fileType + ')');
+                return 'video/mp4';
+            }
+            
+            // Add other extension-based MIME type mappings here if needed
+            // if (fileExtension === 'mov') {
+            //     return 'video/quicktime';
+            // }
+            // if (fileExtension === 'avi') {
+            //     return 'video/x-msvideo';
+            // }
+        }
+        
+        // Fallback to application/octet-stream for unknown types
+        log.debug('MIME Type Fallback', 'Using application/octet-stream for file: ' + fileName + ' (NetSuite type: ' + fileType + ')');
+        return 'application/octet-stream';
     }
 
     function uploadFileToGoogleDrive(attachment, folderId, accessToken) {
         try {
             log.debug('Upload File Debug', 'Attachment Name: ' + attachment.name + ', NetSuite File Type: ' + attachment.type);
-            log.debug('Upload File Debug', 'Mapped MIME Type: ' + MIME_TYPE_MAP[attachment.type]);
+            
+            // Determine the correct MIME type
+            var mimeType = getMimeTypeForFile(attachment.type, attachment.name);
+            log.debug('Upload File Debug', 'Using MIME Type: ' + mimeType);
 
             // Prepare metadata
             var metadata = {
@@ -727,7 +783,7 @@ define([
             var body = delimiter +
                 'Content-Type: application/json\r\n\r\n' +
                 JSON.stringify(metadata) + delimiter +
-                'Content-Type: ' + MIME_TYPE_MAP[attachment.type] + '\r\n' +
+                'Content-Type: ' + mimeType + '\r\n' +
                 'Content-Transfer-Encoding: base64\r\n\r\n' +
                 attachment.content + close_delim;
 
