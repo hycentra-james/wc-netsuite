@@ -226,51 +226,56 @@ define(['N/record', 'N/log', 'N/error', './fedexHelper'],
          */
         function processFedExResponse(fulfillmentRecord, fedexResponse) {
             try {
-                log.debug('DEBUG', 'processFedExResponse() - Processing FedX response');
+                log.debug('DEBUG', 'processFedExResponse() - Processing FedEx response');
 
-                // Extract tracking numbers and labels from response
+                // Extract data from response based on actual FedEx response structure
                 var trackingNumbers = [];
                 var labelUrls = [];
-                var shipmentId = '';
+                var transactionId = '';
+                var alertsJson = '';
 
-                // FedX response structure may vary - adjust as needed
+                // FedEx response structure: response.output.transactionShipments
                 if (fedexResponse.output && fedexResponse.output.transactionShipments) {
                     var shipments = fedexResponse.output.transactionShipments;
                     if (shipments.length > 0) {
                         var firstShipment = shipments[0];
                         
-                        // Get tracking numbers and labels
-                        if (firstShipment.completedShipmentDetail && 
-                            firstShipment.completedShipmentDetail.completedPackageDetails &&
-                            firstShipment.completedShipmentDetail.completedPackageDetails.length > 0) {
-                            
-                            var packageDetails = firstShipment.completedShipmentDetail.completedPackageDetails;
-                            
-                            for (var i = 0; i < packageDetails.length; i++) {
-                                var packageDetail = packageDetails[i];
-                                
-                                // Get tracking number
-                                if (packageDetail.trackingIds && packageDetail.trackingIds.length > 0) {
-                                    trackingNumbers.push(packageDetail.trackingIds[0].trackingNumber);
-                                }
-
-                                // Get label URL
-                                if (packageDetail.label && packageDetail.label.encodedLabel) {
-                                    labelUrls.push(packageDetail.label.encodedLabel);
+                        // Extract tracking number from masterTrackingNumber
+                        if (firstShipment.masterTrackingNumber) {
+                            trackingNumbers.push(firstShipment.masterTrackingNumber);
+                        }
+                        
+                        // Extract label URLs from pieceResponses.packageDocuments
+                        if (firstShipment.pieceResponses && firstShipment.pieceResponses.length > 0) {
+                            for (var i = 0; i < firstShipment.pieceResponses.length; i++) {
+                                var pieceResponse = firstShipment.pieceResponses[i];
+                                if (pieceResponse.packageDocuments && pieceResponse.packageDocuments.length > 0) {
+                                    for (var j = 0; j < pieceResponse.packageDocuments.length; j++) {
+                                        var packageDoc = pieceResponse.packageDocuments[j];
+                                        if (packageDoc.url && packageDoc.contentType === 'LABEL') {
+                                            labelUrls.push(packageDoc.url);
+                                        }
+                                    }
                                 }
                             }
                         }
-
-                        // Get shipment ID
-                        if (firstShipment.shipmentId) {
-                            shipmentId = firstShipment.shipmentId;
+                        
+                        // Extract alerts for error message field
+                        if (firstShipment.alerts && firstShipment.alerts.length > 0) {
+                            alertsJson = JSON.stringify(firstShipment.alerts);
                         }
+                    }
+                    
+                    // Extract transaction ID from top level
+                    if (fedexResponse.transactionId) {
+                        transactionId = fedexResponse.transactionId;
                     }
                 }
 
                 log.debug('DEBUG', 'Extracted Tracking Numbers: ' + JSON.stringify(trackingNumbers));
                 log.debug('DEBUG', 'Extracted Label URLs count: ' + labelUrls.length);
-                log.debug('DEBUG', 'Extracted Shipment ID: ' + shipmentId);
+                log.debug('DEBUG', 'Extracted Transaction ID: ' + transactionId);
+                log.debug('DEBUG', 'Extracted Alerts: ' + alertsJson);
 
                 // Update package records with tracking numbers
                 updatePackageTrackingNumbers(fulfillmentRecord, trackingNumbers);
@@ -283,15 +288,21 @@ define(['N/record', 'N/log', 'N/error', './fedexHelper'],
                     fieldsToUpdate.custbody_shipping_label_url = labelUrls.join(',');
                 }
 
-                if (shipmentId) {
-                    fieldsToUpdate.custbody_shipping_shipment_id = shipmentId;
+                // Store transaction ID (renamed field)
+                if (transactionId) {
+                    fieldsToUpdate.custbody_shipment_transaction_id = transactionId;
                 }
 
                 // Store the full response for reference
                 fieldsToUpdate.custbody_shipping_api_response = JSON.stringify(fedexResponse);
                 
-                // Clear any previous error messages
-                fieldsToUpdate.custbody_shipping_error_message = '';
+                // Store alerts as error message (only if there are alerts)
+                if (alertsJson) {
+                    fieldsToUpdate.custbody_shipping_error_message = alertsJson;
+                } else {
+                    // Clear any previous error messages on success
+                    fieldsToUpdate.custbody_shipping_error_message = '';
+                }
 
                 // Update the record
                 if (Object.keys(fieldsToUpdate).length > 0) {
@@ -306,8 +317,8 @@ define(['N/record', 'N/log', 'N/error', './fedexHelper'],
 
             } catch (e) {
                 log.error({
-                    title: 'FedX Response Processing Error',
-                    details: 'Error processing FedX response: ' + e.message + '\nStack: ' + e.stack
+                    title: 'FedEx Response Processing Error',
+                    details: 'Error processing FedEx response: ' + e.message + '\nStack: ' + e.stack
                 });
                 throw e;
             }

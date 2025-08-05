@@ -113,7 +113,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                 });
 
                 // Add recent fulfillments sublist for easy selection
-                addRecentFulfillmentsSublist(form);
+                // addRecentFulfillmentsSublist(form);
 
                 // Add configuration check section
                 addConfigurationStatus(form);
@@ -197,8 +197,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                         'tranid',
                         'entity',
                         'trandate',
-                        'shipmethod',
-                        'shipcarrier'
+                        'shipmethod'
                     ]
                 });
 
@@ -240,8 +239,9 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                         value: result.getText('shipmethod') || ''
                     });
 
-                    var shipCarrier = result.getText('shipcarrier') || '';
-                    var carrierStatus = shipCarrier ? 'Carrier: ' + shipCarrier : 'No Carrier';
+                    // Try to get shipping status from available fields
+                    var shipMethod = result.getText('shipmethod') || '';
+                    var carrierStatus = shipMethod ? 'Method: ' + shipMethod : 'No Ship Method';
                     
                     recentSublist.setSublistValue({
                         id: 'custpage_if_shipping_status',
@@ -253,8 +253,21 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
             } catch (e) {
                 log.error({
                     title: 'Error adding recent fulfillments sublist',
-                    details: e.message
+                    details: e.message + '\nStack: ' + e.stack
                 });
+                
+                // Add a simple message instead of the sublist if it fails
+                try {
+                    form.addField({
+                        id: 'custpage_sublist_error',
+                        type: serverWidget.FieldType.INLINEHTML,
+                        label: 'Recent Fulfillments',
+                        container: 'custpage_recent_group'
+                    }).defaultValue = '<div style="color: orange; padding: 10px;">Unable to load recent fulfillments. Please enter Fulfillment ID manually above.</div>';
+                } catch (e2) {
+                    // If even this fails, just log it
+                    log.debug('Sublist fallback failed', e2.message);
+                }
             }
         }
 
@@ -392,7 +405,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                 }
 
                 // Create FedEx shipment
-                var result = createTestShipment(fulfillmentRecord, serviceTypeOverride, testMode);
+                var result = createShipment(fulfillmentRecord, serviceTypeOverride, testMode);
 
                 // Redirect to results page
                 var resultUrl = url.resolveScript({
@@ -443,7 +456,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
          * @param {boolean} testMode
          * @returns {Object}
          */
-        function createTestShipment(fulfillmentRecord, serviceTypeOverride, testMode) {
+        function createShipment(fulfillmentRecord, serviceTypeOverride, testMode) {
             try {
                 // Build shipment payload
                 var payload = fedexHelper.buildShipmentPayload(fulfillmentRecord);
@@ -505,17 +518,6 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                 
                 var apiUrl = fedexHelper.getApiUrl();
 
-                // Use sandbox URL if in test mode
-                if (testMode) {
-                    apiUrl = 'https://apis-sandbox.fedex.com/';
-                    log.debug('FedEx Test Mode', 'Using sandbox API URL: ' + apiUrl);
-                }
-
-                // Ensure apiUrl ends with trailing slash
-                if (!apiUrl.endsWith('/')) {
-                    apiUrl = apiUrl + '/';
-                }
-
                 apiUrl += 'ship/v1/shipments';
 
                 log.audit('FedEx Test API Call', 'URL: ' + apiUrl);
@@ -567,71 +569,111 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
 
                 // Process response
                 var trackingNumber = '';
-                var labelUrl = '';
-                var shipmentId = '';
+                var labelUrls = [];
+                var transactionId = '';
+                var alertsJson = '';
 
                 if (response.result && response.result.output && response.result.output.transactionShipments) {
                     var shipments = response.result.output.transactionShipments;
                     if (shipments.length > 0) {
                         var firstShipment = shipments[0];
                         
-                        if (firstShipment.completedShipmentDetail && 
-                            firstShipment.completedShipmentDetail.completedPackageDetails &&
-                            firstShipment.completedShipmentDetail.completedPackageDetails.length > 0) {
-                            
-                            var packageDetail = firstShipment.completedShipmentDetail.completedPackageDetails[0];
-                            if (packageDetail.trackingIds && packageDetail.trackingIds.length > 0) {
-                                trackingNumber = packageDetail.trackingIds[0].trackingNumber;
-                            }
-
-                            if (packageDetail.label && packageDetail.label.encodedLabel) {
-                                labelUrl = packageDetail.label.encodedLabel;
+                        // Extract tracking number
+                        if (firstShipment.masterTrackingNumber) {
+                            trackingNumber = firstShipment.masterTrackingNumber;
+                        }
+                        
+                        // Extract label URLs from all piece responses
+                        if (firstShipment.pieceResponses && firstShipment.pieceResponses.length > 0) {
+                            for (var i = 0; i < firstShipment.pieceResponses.length; i++) {
+                                var pieceResponse = firstShipment.pieceResponses[i];
+                                if (pieceResponse.packageDocuments && pieceResponse.packageDocuments.length > 0) {
+                                    for (var j = 0; j < pieceResponse.packageDocuments.length; j++) {
+                                        var packageDoc = pieceResponse.packageDocuments[j];
+                                        if (packageDoc.url && packageDoc.contentType === 'LABEL') {
+                                            labelUrls.push(packageDoc.url);
+                                        }
+                                    }
+                                }
                             }
                         }
-
-                        if (firstShipment.shipmentId) {
-                            shipmentId = firstShipment.shipmentId;
+                        
+                        // Extract alerts for error message field
+                        if (firstShipment.alerts && firstShipment.alerts.length > 0) {
+                            alertsJson = JSON.stringify(firstShipment.alerts);
                         }
+                    }
+                    
+                    // Extract transaction ID from top level
+                    if (response.result.transactionId) {
+                        transactionId = response.result.transactionId;
                     }
                 }
 
+                // Join multiple label URLs with comma
+                var labelUrlString = labelUrls.join(',');
+
+                log.debug('FedEx Response Processing', 'Tracking: ' + trackingNumber + 
+                         ', Labels: ' + labelUrlString + 
+                         ', Transaction ID: ' + transactionId +
+                         ', Alerts: ' + alertsJson);
+
                 // Update the fulfillment record with results (in test mode, just log)
-                if (!testMode && trackingNumber) {
+                if (!testMode) {
                     // For non-test mode, update the actual record with generic fields
+                    var updateValues = {
+                        custbody_shipping_label_url: labelUrlString,
+                        custbody_shipment_transaction_id: transactionId,
+                        custbody_shipping_api_response: JSON.stringify(response.result)
+                    };
+                    
+                    // Only add error message if there are alerts
+                    if (alertsJson) {
+                        updateValues.custbody_shipping_error_message = alertsJson;
+                    }
+                    
                     record.submitFields({
                         type: record.Type.ITEM_FULFILLMENT,
                         id: fulfillmentRecord.id,
-                        values: {
-                            custbody_shipping_label_url: labelUrl,
-                            custbody_shipping_shipment_id: shipmentId,
-                            custbody_shipping_api_response: JSON.stringify(response.result)
-                        }
+                        values: updateValues
                     });
                     
                     // Update package tracking numbers - need to reload record for packages
-                    var recordForUpdate = record.load({
-                        type: record.Type.ITEM_FULFILLMENT,
-                        id: fulfillmentRecord.id
-                    });
-                    
-                    var packageCount = recordForUpdate.getLineCount({sublistId: 'package'});
-                    if (packageCount > 0) {
-                        recordForUpdate.setSublistValue({
-                            sublistId: 'package',
-                            fieldId: 'packagetrackingnumber',
-                            line: 0,
-                            value: trackingNumber
+                    if (trackingNumber) {
+                        var recordForUpdate = record.load({
+                            type: record.Type.ITEM_FULFILLMENT,
+                            id: fulfillmentRecord.id
                         });
-                        recordForUpdate.save();
+                        
+                        var packageCount = recordForUpdate.getLineCount({sublistId: 'package'});
+                        if (packageCount > 0) {
+                            recordForUpdate.setSublistValue({
+                                sublistId: 'package',
+                                fieldId: 'packagetrackingnumber',
+                                line: 0,
+                                value: trackingNumber
+                            });
+                            recordForUpdate.save();
+                        }
                     }
+                } else {
+                    // In test mode, just log the values that would be updated
+                    log.audit('Test Mode - Would Update Fields', JSON.stringify({
+                        custbody_shipping_label_url: labelUrlString,
+                        custbody_shipment_transaction_id: transactionId,
+                        custbody_shipping_api_response: 'Full API Response (truncated for log)',
+                        custbody_shipping_error_message: alertsJson,
+                        packagetrackingnumber: trackingNumber
+                    }));
                 }
 
                 return {
                     success: true,
                     message: 'FedEx shipment created successfully!' + (testMode ? ' (Test Mode)' : ''),
                     trackingNumber: trackingNumber,
-                    labelUrl: labelUrl,
-                    shipmentId: shipmentId
+                    labelUrl: labelUrlString,
+                    transactionId: transactionId,
+                    alerts: alertsJson
                 };
 
             } catch (e) {
