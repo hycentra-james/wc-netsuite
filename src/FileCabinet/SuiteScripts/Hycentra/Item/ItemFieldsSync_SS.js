@@ -4,6 +4,89 @@
  */
 define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record, search, runtime, log, task) {
 
+    /**
+     * Load related record configurations from custom records
+     * @returns {Array} Array of configuration objects
+     */
+    function getRelatedRecordConfigurations() {
+        try {
+            var configurations = [];
+            
+            // Search for configuration records
+            // Assuming custom record type: customrecord_hyc_related_record_config
+            var configSearch = search.create({
+                type: 'customrecord_hyc_related_record_config',
+                filters: [
+                    ['isinactive', 'is', 'F'] // Only active configurations
+                ],
+                columns: [
+                    'custrecord_hyc_rrc_record_type',      // Related Record Type ID
+                    'custrecord_hyc_rrc_base_item_field',  // Base Item Field ID
+                    'custrecord_hyc_rrc_description',      // Description
+                    'custrecord_hyc_rrc_fields_to_sync',   // Fields to Sync (comma separated)
+                    'custrecord_hyc_rrc_identifier_field'  // Identifier Field ID
+                ]
+            });
+
+            var results = configSearch.run().getRange({ start: 0, end: 100 });
+            
+            log.debug('Configuration Records Found', 'Found ' + results.length + ' configuration records');
+
+            results.forEach(function(result, index) {
+                var recordType = result.getValue('custrecord_hyc_rrc_record_type');
+                var baseItemField = result.getValue('custrecord_hyc_rrc_base_item_field');
+                var description = result.getValue('custrecord_hyc_rrc_description');
+                var fieldsToSyncStr = result.getValue('custrecord_hyc_rrc_fields_to_sync');
+                var identifierField = result.getValue('custrecord_hyc_rrc_identifier_field');
+                
+                // Convert comma-separated fields to array
+                var fieldsToSync = [];
+                if (fieldsToSyncStr) {
+                    fieldsToSync = fieldsToSyncStr.split(',').map(function(field) {
+                        return field.trim();
+                    });
+                }
+                
+                var config = {
+                    recordType: recordType,
+                    baseItemField: baseItemField,
+                    description: description,
+                    fieldsToSync: fieldsToSync,
+                    identifierField: identifierField
+                };
+                
+                configurations.push(config);
+                
+                log.debug('Loaded Configuration ' + (index + 1), 
+                    'Type: ' + recordType + 
+                    ', Description: ' + description + 
+                    ', Fields: [' + fieldsToSync.join(', ') + ']' +
+                    ', Identifier: ' + identifierField
+                );
+            });
+            
+            log.debug('Total Configurations Loaded', configurations.length + ' configurations loaded successfully');
+            return configurations;
+            
+        } catch (e) {
+            log.error('Error loading configurations', 'Error: ' + e.message);
+            // Return hardcoded fallback configuration if custom records are not available
+            return [{
+                recordType: 'customrecord_hyc_cabinet_wood_material',
+                baseItemField: 'custrecord_hyc_vanity_wood_mat_baseitem',
+                description: 'Cabinet Wood Material (Fallback)',
+                fieldsToSync: [
+                    'custrecord_hyc_vanity_wood_mat_seq',
+                    'custrecord_hyc_vanity_wood_mat_material',
+                    'custrecord_hyc_vanity_wood_mat_pct',
+                    'custrecord_hyc_vanity_wood_mat_grow_loc',
+                    'custrecord_hyc_vanity_wood_wood_region'
+                ],
+                identifierField: 'custrecord_hyc_vanity_wood_mat_seq'
+            }];
+        }
+    }
+
     function execute(context) {
         try {
             // Retrieve parameters passed from User Event Script
@@ -63,6 +146,9 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
     
                         updateSharedFields(fieldsToUpdate, kitRecord, itemRecord);
     
+                        // Synchronize related custom records
+                        synchronizeRelatedRecords(itemId, kitId);
+
                         kitRecord.save();
                         log.debug('Updated Kit', 'Kit ID: ' + kitId);
                     }
@@ -80,6 +166,315 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
             }
         } catch (e) {
             log.error('Error in Scheduled Script', e);
+        }
+    }
+
+    /**
+     * Synchronize related custom records from inventory item to kit
+     * @param {string} itemId - The inventory item ID
+     * @param {string} kitId - The kit item ID
+     */
+    function synchronizeRelatedRecords(itemId, kitId) {
+        try {
+            log.debug('Synchronizing Related Records', 'Item ID: ' + itemId + ' -> Kit ID: ' + kitId);
+            
+            // Load configurations from custom records
+            var relatedRecordConfigs = getRelatedRecordConfigurations();
+            
+            // Loop through each configured custom record type
+            relatedRecordConfigs.forEach(function(recordConfig) {
+                synchronizeCustomRecordType(itemId, kitId, recordConfig);
+            });
+            
+        } catch (e) {
+            log.error('Error in synchronizeRelatedRecords', 'Item ID: ' + itemId + ', Kit ID: ' + kitId + ', Error: ' + e.message);
+        }
+    }
+
+    /**
+     * Synchronize a specific custom record type from inventory item to kit
+     * @param {string} itemId - The inventory item ID
+     * @param {string} kitId - The kit item ID
+     * @param {Object} recordConfig - Configuration object for the custom record type
+     */
+    function synchronizeCustomRecordType(itemId, kitId, recordConfig) {
+        try {
+            log.debug('Processing Custom Record Type', recordConfig.description + ' (' + recordConfig.recordType + ')');
+            
+            // Find all related records for the inventory item
+            var relatedRecords = getRelatedRecords(itemId, recordConfig);
+            
+            log.debug('Found Related Records', recordConfig.description + ': ' + relatedRecords.length + ' records for Item ID: ' + itemId);
+            
+            // For each related record, create or update corresponding record for the kit
+            relatedRecords.forEach(function(relatedRecord, index) {
+                log.debug('Processing Record ' + (index + 1), 'Record ID: ' + relatedRecord.id + ', Identifier: ' + relatedRecord.record.getValue(recordConfig.identifierField || 'id'));
+                createOrUpdateKitRelatedRecord(kitId, relatedRecord, recordConfig);
+            });
+            
+            log.debug('Completed Record Type', recordConfig.description + ' - Processed ' + relatedRecords.length + ' records');
+            
+        } catch (e) {
+            log.error('Error in synchronizeCustomRecordType', 'Record Type: ' + recordConfig.recordType + ', Error: ' + e.message);
+        }
+    }
+
+    /**
+     * Get all related records of a specific type for an inventory item
+     * @param {string} itemId - The inventory item ID
+     * @param {Object} recordConfig - Configuration object for the custom record type
+     * @returns {Array} Array of related record data
+     */
+    function getRelatedRecords(itemId, recordConfig) {
+        try {
+            var relatedRecords = [];
+            
+            log.debug('Searching for Related Records', 'Item ID: ' + itemId + ', Record Type: ' + recordConfig.recordType + ', Base Item Field: ' + recordConfig.baseItemField);
+            
+            var relatedRecordSearch = search.create({
+                type: recordConfig.recordType,
+                filters: [
+                    [recordConfig.baseItemField, 'is', itemId]
+                ],
+                columns: [
+                    'internalid',
+                    recordConfig.identifierField || 'internalid' // Include sequence field in search results for debugging
+                ]
+            });
+
+            var searchResults = relatedRecordSearch.run().getRange({
+                start: 0,
+                end: 1000
+            });
+
+            log.debug('Search Results Found', 'Found ' + searchResults.length + ' records in search');
+
+            searchResults.forEach(function(result, index) {
+                var recordId = result.getValue('internalid');
+                var sequenceValue = recordConfig.identifierField ? result.getValue(recordConfig.identifierField) : 'N/A';
+                
+                log.debug('Loading Record ' + (index + 1), 'Record ID: ' + recordId + ', Identifier: ' + sequenceValue);
+                
+                // Load the full record to get all field values
+                var fullRecord = record.load({
+                    type: recordConfig.recordType,
+                    id: recordId
+                });
+                
+                relatedRecords.push({
+                    id: recordId,
+                    record: fullRecord
+                });
+                
+                log.debug('Loaded Record ' + (index + 1), 'Successfully loaded record ID: ' + recordId);
+            });
+
+            log.debug('Total Records Loaded', 'Successfully loaded ' + relatedRecords.length + ' records for Item ID: ' + itemId);
+            return relatedRecords;
+            
+        } catch (e) {
+            log.error('Error in getRelatedRecords', 'Item ID: ' + itemId + ', Record Type: ' + recordConfig.recordType + ', Error: ' + e.message);
+            return [];
+        }
+    }
+
+    /**
+     * Create or update a related record for the kit
+     * @param {string} kitId - The kit item ID
+     * @param {Object} sourceRecordData - The source record data from inventory item
+     * @param {Object} recordConfig - Configuration object for the custom record type
+     */
+    function createOrUpdateKitRelatedRecord(kitId, sourceRecordData, recordConfig) {
+        try {
+            var sourceRecord = sourceRecordData.record;
+            var sequenceValue = recordConfig.identifierField ? sourceRecord.getValue(recordConfig.identifierField) : 'N/A';
+            
+            log.debug('Processing Kit Record', 'Kit ID: ' + kitId + ', Source Record ID: ' + sourceRecordData.id + ', Identifier: ' + sequenceValue);
+            
+            // Check if a related record already exists for this kit
+            var existingRecord = findExistingKitRelatedRecord(kitId, sourceRecord, recordConfig);
+            
+            if (existingRecord) {
+                log.debug('Found Existing Record', 'Existing Record ID: ' + existingRecord + ' for Kit ID: ' + kitId + ', Identifier: ' + sequenceValue);
+                // Update existing record
+                updateExistingRelatedRecord(existingRecord, sourceRecord, recordConfig);
+                log.debug('Updated Existing Record', recordConfig.description + ' ID: ' + existingRecord + ', Identifier: ' + sequenceValue);
+            } else {
+                log.debug('No Existing Record Found', 'Creating new record for Kit ID: ' + kitId + ', Identifier: ' + sequenceValue);
+                // Create new record
+                var newRecordId = createNewRelatedRecord(kitId, sourceRecord, recordConfig);
+                log.debug('Created New Record', recordConfig.description + ' ID: ' + newRecordId + ', Identifier: ' + sequenceValue);
+            }
+            
+        } catch (e) {
+            log.error('Error in createOrUpdateKitRelatedRecord', 'Kit ID: ' + kitId + ', Source Record ID: ' + sourceRecordData.id + ', Record Type: ' + recordConfig.recordType + ', Error: ' + e.message);
+            // Don't throw the error - continue processing other records
+        }
+    }
+
+    /**
+     * Find existing related record for kit (to avoid duplicates)
+     * @param {string} kitId - The kit item ID
+     * @param {Record} sourceRecord - The source record
+     * @param {Object} recordConfig - Configuration object for the custom record type
+     * @returns {string|null} Existing record ID or null if not found
+     */
+    function findExistingKitRelatedRecord(kitId, sourceRecord, recordConfig) {
+        try {
+            // First, get all related records for this kit (without sequence filtering)
+            var filters = [
+                [recordConfig.baseItemField, 'is', kitId]
+            ];
+            
+            var sequenceValue = null;
+            if (recordConfig.identifierField) {
+                sequenceValue = sourceRecord.getValue(recordConfig.identifierField);
+                log.debug('Looking for Identifier', 'Kit ID: ' + kitId + ', Target Identifier: ' + sequenceValue);
+            }
+            
+            log.debug('Search Filters (No Identifier)', 'Kit ID: ' + kitId + ', Filters: ' + JSON.stringify(filters));
+            
+            var existingSearch = search.create({
+                type: recordConfig.recordType,
+                filters: filters,
+                columns: [
+                    'internalid',
+                    recordConfig.identifierField || 'internalid' // Include identifier field in search results for debugging
+                ]
+            });
+
+            var results = existingSearch.run().getRange({ start: 0, end: 50 });
+            
+            log.debug('All Kit Records Found', 'Kit ID: ' + kitId + ', Found ' + results.length + ' total records');
+            
+            // Log all found records for debugging
+            results.forEach(function(result, index) {
+                var foundId = result.getValue('internalid');
+                var foundSequence = recordConfig.identifierField ? result.getValue(recordConfig.identifierField) : 'N/A';
+                log.debug('Kit Record ' + (index + 1), 'Record ID: ' + foundId + ', Identifier: ' + foundSequence);
+            });
+            
+            // If no sequence field, return the first record (or null if none found)
+            if (!recordConfig.identifierField || !sequenceValue) {
+                var returnValue = results.length > 0 ? results[0].getValue('internalid') : null;
+                log.debug('No Sequence Matching', 'Returning first record: ' + returnValue);
+                return returnValue;
+            }
+            
+            // Manual filtering by sequence - find matching record
+            var matchingRecord = null;
+            for (var i = 0; i < results.length; i++) {
+                var result = results[i];
+                var foundSequence = result.getValue(recordConfig.identifierField);
+                
+                log.debug('Sequence Comparison', 'Comparing - Target: "' + sequenceValue + '" vs Found: "' + foundSequence + '" (Type: ' + typeof sequenceValue + ' vs ' + typeof foundSequence + ')');
+                
+                // Convert both to strings for comparison to handle type mismatches
+                if (String(foundSequence) === String(sequenceValue)) {
+                    matchingRecord = result.getValue('internalid');
+                    log.debug('Sequence Match Found', 'Record ID: ' + matchingRecord + ', Identifier: ' + foundSequence);
+                    break;
+                }
+            }
+            
+            if (!matchingRecord) {
+                log.debug('No Identifier Match', 'Kit ID: ' + kitId + ', Target Identifier: ' + sequenceValue + ' - No matching record found');
+            }
+            
+            return matchingRecord;
+            
+        } catch (e) {
+            log.error('Error in findExistingKitRelatedRecord', 'Kit ID: ' + kitId + ', Error: ' + e.message);
+            return null;
+        }
+    }
+
+    /**
+     * Create a new related record for the kit
+     * @param {string} kitId - The kit item ID
+     * @param {Record} sourceRecord - The source record to copy from
+     * @param {Object} recordConfig - Configuration object for the custom record type
+     * @returns {string} New record ID
+     */
+    function createNewRelatedRecord(kitId, sourceRecord, recordConfig) {
+        try {
+            var newRecord = record.create({
+                type: recordConfig.recordType
+            });
+
+            // Copy only the specified fields from source record
+            recordConfig.fieldsToSync.forEach(function(fieldId) {
+                try {
+                    var fieldValue = sourceRecord.getValue(fieldId);
+                    if (fieldValue !== null && fieldValue !== undefined && fieldValue !== '') {
+                        newRecord.setValue({
+                            fieldId: fieldId,
+                            value: fieldValue
+                        });
+                        log.debug('Copied Field', 'Field: ' + fieldId + ', Value: ' + fieldValue);
+                    }
+                } catch (fieldError) {
+                    log.error('Error copying field', 'Field ID: ' + fieldId + ', Error: ' + fieldError.message);
+                }
+            });
+
+            // Set the base item field to point to the kit
+            newRecord.setValue({
+                fieldId: recordConfig.baseItemField,
+                value: kitId
+            });
+
+            return newRecord.save();
+            
+        } catch (e) {
+            log.error('Error in createNewRelatedRecord', 'Kit ID: ' + kitId + ', Record Type: ' + recordConfig.recordType + ', Error: ' + e.message);
+            throw e;
+        }
+    }
+
+    /**
+     * Update an existing related record for the kit
+     * @param {string} existingRecordId - The existing record ID
+     * @param {Record} sourceRecord - The source record to copy from
+     * @param {Object} recordConfig - Configuration object for the custom record type
+     */
+    function updateExistingRelatedRecord(existingRecordId, sourceRecord, recordConfig) {
+        try {
+            var existingRecord = record.load({
+                type: recordConfig.recordType,
+                id: existingRecordId
+            });
+
+            var hasChanges = false;
+            
+            // Update only the specified fields
+            recordConfig.fieldsToSync.forEach(function(fieldId) {
+                try {
+                    var sourceValue = sourceRecord.getValue(fieldId);
+                    var existingValue = existingRecord.getValue(fieldId);
+                    
+                    if (sourceValue !== existingValue && sourceValue !== null && sourceValue !== undefined && sourceValue !== '') {
+                        existingRecord.setValue({
+                            fieldId: fieldId,
+                            value: sourceValue
+                        });
+                        hasChanges = true;
+                        log.debug('Updated Field', 'Field: ' + fieldId + ', Old Value: ' + existingValue + ', New Value: ' + sourceValue);
+                    }
+                } catch (fieldError) {
+                    log.error('Error updating field', 'Field ID: ' + fieldId + ', Error: ' + fieldError.message);
+                }
+            });
+
+            if (hasChanges) {
+                existingRecord.save();
+                log.debug('Updated Record', 'Record ID: ' + existingRecordId + ' has been updated');
+            } else {
+                log.debug('No Changes', 'Record ID: ' + existingRecordId + ' - no updates needed');
+            }
+            
+        } catch (e) {
+            log.error('Error in updateExistingRelatedRecord', 'Record ID: ' + existingRecordId + ', Error: ' + e.message);
         }
     }
 

@@ -190,10 +190,40 @@ define(['N/search', 'N/ui/serverWidget'], function (search, serverWidget) {
             mySearch.save();
             */
 
+            var mySearch = search.load({ id: 1827 });
+            mySearch.columns.push(search.createColumn({name: 'custitem_countertop_color', label: 'netsuite-p:custitem_countertop_color:custitem_countertop_color (Meta)'}));
+            mySearch.columns.push(search.createColumn({name: 'custitem_hyc_backsplash_finish', label: 'netsuite-p:custitem_hyc_backsplash_finish:custitem_hyc_backsplash_finish (Meta)'}));
+            mySearch.columns.push(search.createColumn({name: 'custitem_hyc_backsplash_material', label: 'netsuite-p:custitem_hyc_backsplash_material:custitem_hyc_backsplash_material (Meta)'}));;
+            
+
+            mySearch.save();
+            
+            /*
             srch = search.create({
                 type: "customrecord_fmt_itmlandedcostsetup",
                 filters: [],
                 columns: [
+                    search.createColumn({name: "custitem_fmt_item_width", label: "netsuite-p:custitem_fmt_item_width:custitem_fmt_item_width (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_item_length", label: "netsuite-p:custitem_fmt_item_length:custitem_fmt_item_length (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_item_height", label: "netsuite-p:custitem_fmt_item_height:custitem_fmt_item_height (Meta)"}),
+                    search.createColumn({name: "custitem_wc_item_weight", label: "netsuite-p:custitem_wc_item_weight:custitem_wc_item_weight (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_frame_color_group", label: "netsuite-p:custitem_hyc_mirror_frame_color_group:custitem_hyc_mirror_frame_color_group (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_framed_color", label: "netsuite-p:custitem_hyc_mirror_framed_color:custitem_hyc_mirror_framed_color (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_frame_mat", label: "netsuite-p:custitem_hyc_mirror_frame_mat:custitem_hyc_mirror_frame_mat (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_frame_finish", label: "netsuite-p:custitem_hyc_mirror_frame_finish:custitem_hyc_mirror_frame_finish (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_mirror_orientation", label: "netsuite-p:custitem_fmt_mirror_orientation:custitem_fmt_mirror_orientation (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_shape", label: "netsuite-p:custitem_hyc_mirror_shape:custitem_hyc_mirror_shape (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_framed_yn", label: "netsuite-p:custitem_hyc_mirror_framed_yn:custitem_hyc_mirror_framed_yn (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_mirror_frame_style", label: "netsuite-p:custitem_hyc_mirror_frame_style:custitem_hyc_mirror_frame_style (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_glass_magnifying", label: "netsuite-p:custitem_hyc_glass_magnifying:custitem_hyc_glass_magnifying (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_glass_edge_type", label: "netsuite-p:custitem_hyc_glass_edge_type:custitem_hyc_glass_edge_type (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_storage_included", label: "netsuite-p:custitem_fmt_storage_included:custitem_fmt_storage_included (Meta)"}),
+                    search.createColumn({name: "custitem_hyc_lighting_included", label: "netsuite-p:custitem_hyc_lighting_included:custitem_hyc_lighting_included (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_style", label: "netsuite-p:custitem_fmt_style:custitem_fmt_style (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_item_width", label: "netsuite-p:custitem_fmt_item_width:custitem_fmt_item_width (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_item_length", label: "netsuite-p:custitem_fmt_item_length:custitem_fmt_item_length (Meta)"}),
+                    search.createColumn({name: "custitem_fmt_item_height", label: "netsuite-p:custitem_fmt_item_height:custitem_fmt_item_height (Meta)"}),
+                    search.createColumn({name: "custitem_wc_item_weight", label: "netsuite-p:custitem_wc_item_weight:custitem_wc_item_weight (Meta)"}),
                     search.createColumn({name: "custrecord_fmt_costcategory", label: "Cost Category"}),
                     search.createColumn({name: "custrecord_fmt_lcpct", label: "Percentage"}),
                     search.createColumn({name: "custrecord_fmt_item", label: "Item"}),
@@ -211,6 +241,7 @@ define(['N/search', 'N/ui/serverWidget'], function (search, serverWidget) {
                 title: "JL - Item Landed Cost Setup"
             });
             srch.save();
+            */
             context.response.writePage('Done');
         }
     }
