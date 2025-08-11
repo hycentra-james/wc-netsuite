@@ -7,7 +7,20 @@
 define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search'],
     function (runtime, record, format, https, error, log, file, search) {
         const CONFIG_RECORD_TYPE = 'customrecord_hyc_fedex_config';
-        const CONFIG_RECORD_ID = 1; // TODO: Change this Record ID after production for FedEx
+        const SANDBOX_CONFIG_RECORD_ID = 1; // TODO: Change this Record ID after production for FedEx
+        const PRODUCTION_CONFIG_RECORD_ID = 2; // TODO: Change this Record ID after production for FedEx
+        
+        // Module-level variable to store test mode flag
+        var IS_TEST_MODE = false;
+
+        /**
+         * Get the current config record ID based on test mode
+         *
+         * @returns {number} Config record ID
+         */
+        function getCurrentConfigRecordId() {
+            return IS_TEST_MODE ? SANDBOX_CONFIG_RECORD_ID : PRODUCTION_CONFIG_RECORD_ID;
+        }
 
         /**
          * Get the FedEx API URL endpoint from the custom preferences
@@ -16,10 +29,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          */
         function getApiUrl() {
             try {
+                // Get config record ID based on current test mode
+                var configRecordId = getCurrentConfigRecordId();
+                log.debug('DEBUG', 'getApiUrl()::IS_TEST_MODE = ' + IS_TEST_MODE + ', using config record ID = ' + configRecordId);
+                
                 // Load the config record directly to avoid circular dependency
                 var tokenRecord = record.load({
                     type: CONFIG_RECORD_TYPE,
-                    id: CONFIG_RECORD_ID
+                    id: configRecordId
                 });
 
                 if (!tokenRecord.isEmpty) {
@@ -53,7 +70,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Load the Token from configuration
                 var tokenRecord = record.load({
                     type: CONFIG_RECORD_TYPE,
-                    id: CONFIG_RECORD_ID
+                    id: getCurrentConfigRecordId()
                 });
 
                 // Check if the token is still valid
@@ -204,7 +221,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             // Update the record with the new access token and expiration value
             record.submitFields({
                 type: CONFIG_RECORD_TYPE,
-                id: CONFIG_RECORD_ID,
+                id: getCurrentConfigRecordId(),
                 values: {
                     'custrecord_hyc_fedex_access_token': newAccessToken,
                     'custrecord_hyc_fedex_expiration': new Date(expirationTimestamp)
@@ -293,7 +310,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             try {
                 var customerId = fulfillmentRecord.getValue({ fieldId: 'entity' });
                 var shipMethodId = fulfillmentRecord.getValue({ fieldId: 'shipmethod' });
-                
+
                 log.debug('DEBUG', 'getShippingLabelMapping()::customerId = ' + customerId);
                 log.debug('DEBUG', 'getShippingLabelMapping()::shipMethodId = ' + shipMethodId);
 
@@ -310,12 +327,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             'custrecord_hyc_ship_lbl_ship_from',
                             'custrecord_hyc_ship_lbl_account_no',
                             'custrecord_hyc_ship_lbl_customer_ref_1',
-                            'custrecord_hyc_ship_lbl_customer_ref_2'
+                            'custrecord_hyc_ship_lbl_customer_ref_2',
+                            'custrecord_hyc_ship_lbl_customer_ref_3',
+                            'custrecord_hyc_ship_lbl_3p_bill_addr'
                         ]
                     });
 
                     var searchResults = mappingSearch.run().getRange({ start: 0, end: 1 });
-                    
+
                     if (searchResults && searchResults.length > 0) {
                         log.debug('DEBUG', 'getShippingLabelMapping()::Found mapping record');
                         return searchResults[0];
@@ -331,10 +350,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     type: 'customrecord_hyc_shipping_label_mapping',
                     id: 10
                 });
-                
+
                 // Convert to search result format for consistency
                 return {
-                    getValue: function(fieldId) {
+                    getValue: function (fieldId) {
                         return fallbackRecord.getValue({ fieldId: fieldId });
                     }
                 };
@@ -346,6 +365,58 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Build shipping charges payment section
+         *
+         * @param {boolean} isBillToThirdParty Whether to bill to third party
+         * @param {Object} mappingRecord The shipping label mapping record
+         * @param {string} accountNumber The account number for third party billing
+         * @param {string} wcAccountNumber Water Creation account number for test mode
+         * @returns {Object} Shipping charges payment section
+         */
+        function buildShippingChargesPayment(isBillToThirdParty, mappingRecord, billingAccountNumber) {
+            try {
+                if (isBillToThirdParty && mappingRecord) {
+                    // Get third party billing address from mapping
+                    var thirdPartyBillAddrJson = mappingRecord.getValue('custrecord_hyc_ship_lbl_3p_bill_addr');
+                    log.debug('DEBUG', 'buildShippingChargesPayment()::thirdPartyBillAddrJson = ' + thirdPartyBillAddrJson);
+                    
+                    if (thirdPartyBillAddrJson) {
+                        var thirdPartyInfo = JSON.parse(thirdPartyBillAddrJson);
+                        
+                        log.debug('DEBUG', 'buildShippingChargesPayment()::IS_TEST_MODE = ' + IS_TEST_MODE);
+                        log.debug('DEBUG', 'buildShippingChargesPayment()::billingAccountNumber = ' + billingAccountNumber);
+                        
+                        return {
+                            "paymentType": "THIRD_PARTY",
+                            "payor": {
+                                "responsibleParty": {
+                                    "contact": thirdPartyInfo.contact,
+                                    "address": thirdPartyInfo.address,
+                                    "accountNumber": {
+                                        "value": billingAccountNumber
+                                    }
+                                }
+                            }
+                        };
+                    }
+                }
+                
+                // Fallback to SENDER payment type
+                log.debug('DEBUG', 'buildShippingChargesPayment()::Using SENDER payment type');
+                return {
+                    "paymentType": "SENDER"
+                };
+                
+            } catch (e) {
+                log.error('ERROR', 'Failed to build shipping charges payment: ' + e.message);
+                // Fallback to SENDER on error
+                return {
+                    "paymentType": "SENDER"
+                };
+            }
+        }
+
+        /**
          * Build FedEx Create Shipment request payload from NetSuite Item Fulfillment
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
@@ -353,29 +424,29 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          */
         function buildShipmentPayload(fulfillmentRecord) {
             try {
+                var isBillToThirdParty = false;
                 // Get shipping label mapping record once
                 var mappingRecord = getShippingLabelMapping(fulfillmentRecord);
-                
+
                 // Get account number from mapping or fallback to config
+                var wcAccountNumber = getTokenRecord().getValue({ fieldId: 'custrecord_hyc_fedex_account_number' });
                 var accountNumber = null;
 
                 // TODO: This account number will be used for third party billing later.
-                // if (mappingRecord) {
-                //    accountNumber = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
-                //}
-                
-                if (!accountNumber) {
-                    // Fallback to token record
-                    var tokenRecord = getTokenRecord();
-                    accountNumber = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_account_number' });
+                if (mappingRecord) {
+                    accountNumber = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
+                    isBillToThirdParty = true;
                 }
 
-                if (!accountNumber) {
+                if (isBillToThirdParty && !accountNumber) {
                     throw error.create({
-                        name: 'MISSING_ACCOUNT_NUMBER',
-                        message: 'FedEx account number not configured in settings or mapping'
+                        name: 'MISSING_THIRD_PARTY_ACCOUNT_NUMBER',
+                        message: 'FedEx account number not configured in settings or mapping for third party billing'
                     });
                 }
+                
+                // Use wcAccountNumber in test mode, otherwise use accountNumber
+                var billingAccountNumber = IS_TEST_MODE ? wcAccountNumber : accountNumber;
 
                 // Build the payload - match FedEx example structure
                 var payload = {
@@ -388,31 +459,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         "packagingType": getPackagingType(fulfillmentRecord),
                         "pickupType": "USE_SCHEDULED_PICKUP",
                         "blockInsightVisibility": false,
-                        "shippingChargesPayment": {
-                            "paymentType": "SENDER" // SENDER / THIRD_PARTY
-                            // The following is for bill to third party:
-                            /*
-                            "paymentType": "THIRD_PARTY",
-                            "payor": {
-                                "responsibleParty": {
-                                    "address": {
-                                        "streetLines": ["7301 W 25th Street", "Unit #114"],
-                                        "city": "North Riverside",
-                                        "stateOrProvinceCode": "IL",
-                                        "postalCode": "60546",
-                                        "countryCode": "US",
-                                        "residential": false
-                                    },
-                                    "contact": {
-                                        "companyName": "BisonOffice LLC"
-                                    },
-                                    "accountNumber": {
-                                        "value": "671128036"
-                                    }
-                                }
-                            }
-                            */
-                        },
+                        "shippingChargesPayment": buildShippingChargesPayment(isBillToThirdParty, mappingRecord, billingAccountNumber),
                         "labelSpecification": {
                             "imageType": "ZPLII",
                             "labelStockType": "STOCK_4X6"
@@ -420,7 +467,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         "requestedPackageLineItems": buildPackageLineItems(fulfillmentRecord, mappingRecord)
                     },
                     "accountNumber": {
-                        "value": accountNumber
+                        "value": wcAccountNumber  // TODO: Fix this with the Bill to Third Party Account ?
                     }
                 };
 
@@ -448,7 +495,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 if (mappingRecord) {
                     var shipFromJson = mappingRecord.getValue('custrecord_hyc_ship_lbl_ship_from');
                     log.debug('DEBUG', 'buildShipperInfo()::shipFromJson = ' + shipFromJson);
-                    
+
                     if (shipFromJson) {
                         var shipperInfo = JSON.parse(shipFromJson);
                         log.debug('DEBUG', 'buildShipperInfo()::Using custom shipper info from mapping');
@@ -463,7 +510,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             // Final fallback to hardcoded values if everything fails
             log.debug('DEBUG', 'buildShipperInfo()::Using hardcoded fallback shipper info');
             var companyInfo = runtime.getCurrentUser().getPreference({ name: 'COMPANYNAME' }) || 'Water Creation';
-            
+
             return {
                 "contact": {
                     "personName": "Shipping Department",
@@ -493,28 +540,28 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var salesOrderId = fulfillmentRecord.getValue({ fieldId: 'createdfrom' });
                 if (salesOrderId) {
                     log.debug('DEBUG', 'buildRecipientInfo()::salesOrderId = ' + salesOrderId);
-                    
+
                     var salesOrderRecord = record.load({
                         type: record.Type.SALES_ORDER,
                         id: salesOrderId
                     });
-                    
+
                     var jsonPayload = salesOrderRecord.getValue({ fieldId: 'custbody_lb_sourced_data' });
                     if (jsonPayload) {
                         log.debug('DEBUG', 'buildRecipientInfo()::jsonPayload = ' + jsonPayload);
-                        
+
                         var parsedData = JSON.parse(jsonPayload);
                         if (parsedData && parsedData.packSlipFields && parsedData.packSlipFields.ShipTo) {
                             var shipTo = parsedData.packSlipFields.ShipTo;
-                            
+
                             var streetLines = [];
                             if (shipTo.Address1) streetLines.push(shipTo.Address1);
                             if (shipTo.Address2) streetLines.push(shipTo.Address2);
-                            
+
                             return {
                                 "contact": {
                                     "personName": shipTo.CompanyName || 'Customer',
-                                    "phoneNumber": shipTo.Phone || ''
+                                    "phoneNumber": shipTo.Phone || '9097731777'
                                 },
                                 "address": {
                                     "streetLines": streetLines.length > 0 ? streetLines : ["Address Not Available"],
@@ -718,7 +765,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     // Extract field name from formula
                     var fieldName = referenceValue.substring(1, referenceValue.length - 1);
                     log.debug('DEBUG', 'processReferenceValue()::Processing formula field = ' + fieldName);
-                    
+
                     if (salesOrderRecord) {
                         var fieldValue = salesOrderRecord.getValue({ fieldId: fieldName });
                         log.debug('DEBUG', 'processReferenceValue()::Formula result = ' + fieldValue);
@@ -763,7 +810,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     // Reference 1 from mapping
                     var reference1Value = mappingRecord.getValue('custrecord_hyc_ship_lbl_customer_ref_1');
                     var processedRef1 = processReferenceValue(reference1Value, salesOrderRecord);
-                    
+
                     if (processedRef1) {
                         references.push({
                             "customerReferenceType": "CUSTOMER_REFERENCE",
@@ -774,11 +821,22 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     // Reference 2 from mapping
                     var reference2Value = mappingRecord.getValue('custrecord_hyc_ship_lbl_customer_ref_2');
                     var processedRef2 = processReferenceValue(reference2Value, salesOrderRecord);
-                    
+
                     if (processedRef2) {
                         references.push({
                             "customerReferenceType": "P_O_NUMBER",
                             "value": processedRef2.toString().substring(0, 30)
+                        });
+                    }
+
+                    // Reference 3 from mapping
+                    var reference3Value = mappingRecord.getValue('custrecord_hyc_ship_lbl_customer_ref_3');
+                    var processedRef3 = processReferenceValue(reference3Value, salesOrderRecord);
+
+                    if (processedRef3) {
+                        references.push({
+                            "customerReferenceType": "INVOICE_NUMBER",
+                            "value": processedRef3.toString().substring(0, 30)
                         });
                     }
                 } else {
@@ -800,6 +858,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         references.push({
                             "customerReferenceType": "P_O_NUMBER",
                             "value": reference2.toString().substring(0, 30)
+                        });
+                    }
+
+                    var reference3 = fulfillmentRecord.getValue({ fieldId: 'custbody_shipping_reference3' }) || '';
+
+                    if (reference3) {
+                        references.push({
+                            "customerReferenceType": "INVOICE_NUMBER",
+                            "value": reference3.toString().substring(0, 30)
                         });
                     }
                 }
@@ -956,7 +1023,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Generate filename
                 var dateStr = getCurrentDateForFilename();
                 var fileName = dateStr + '_' + salesOrderNumber + '.zpl';
-                
+
                 log.debug('DEBUG', 'downloadAndSaveLabel()::fileName = ' + fileName);
 
                 // Download the label using bearer token
@@ -989,7 +1056,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Generate the NetSuite file URL
                 var fileRecord = file.load({ id: fileId });
                 var fileUrl = fileRecord.url;
-                
+
                 log.debug('DEBUG', 'File URL: ' + fileUrl);
                 return fileUrl;
 
@@ -1016,7 +1083,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 });
 
                 var searchResults = folderSearch.run().getRange({ start: 0, end: 1 });
-                
+
                 if (searchResults && searchResults.length > 0) {
                     var folderId = searchResults[0].getValue('internalid');
                     log.debug('DEBUG', 'Found existing FedEx Label folder with ID: ' + folderId);
@@ -1028,10 +1095,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var folderRecord = record.create({
                     type: record.Type.FOLDER
                 });
-                
+
                 folderRecord.setValue({ fieldId: 'name', value: 'FedEx Label' });
                 // Set parent to File Cabinet root (leave parent empty for root level)
-                
+
                 var newFolderId = folderRecord.save();
                 log.debug('DEBUG', 'Created FedEx Label folder with ID: ' + newFolderId);
                 return newFolderId;
@@ -1053,6 +1120,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          */
         function createShipment(fulfillmentRecord, serviceTypeOverride, testMode) {
             try {
+                // Set the module-level test mode flag
+                IS_TEST_MODE = testMode || false;
+                log.debug('DEBUG', 'createShipment()::Set IS_TEST_MODE = ' + IS_TEST_MODE);
+                
                 // Build shipment payload
                 var payload = buildShipmentPayload(fulfillmentRecord);
 
@@ -1063,18 +1134,18 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 // Get API configuration and force token refresh
                 var tokenRecord = getTokenRecord();
-                
+
                 // Log current configuration for verification
-                var apiKey = tokenRecord.getValue({fieldId: 'custrecord_hyc_fedex_client_id'});
-                var secretKey = tokenRecord.getValue({fieldId: 'custrecord_hyc_fedex_secret'});
-                var accountNumber = tokenRecord.getValue({fieldId: 'custrecord_hyc_fedex_account_number'});
-                var endpoint = tokenRecord.getValue({fieldId: 'custrecord_hyc_fedex_endpoint'});
-                
+                var apiKey = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_client_id' });
+                var secretKey = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_secret' });
+                var accountNumber = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_account_number' });
+                var endpoint = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_endpoint' });
+
                 log.debug('DEBUG', 'Current Client ID (first 10 chars): ' + (apiKey ? apiKey.substring(0, 10) + '...' : 'EMPTY'));
                 log.debug('DEBUG', 'Current Client Secret (first 10 chars): ' + (secretKey ? secretKey.substring(0, 10) + '...' : 'EMPTY'));
                 log.debug('DEBUG', 'Current Account Number: ' + accountNumber);
                 log.debug('DEBUG', 'Current Endpoint: ' + endpoint);
-                
+
                 // If API key is empty, show error
                 if (!apiKey || !secretKey) {
                     throw error.create({
@@ -1082,40 +1153,40 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         message: 'Client ID or Client Secret is empty in NetSuite custom record. Please update the HYC FedEx Configuration record with your new FedEx API credentials.'
                     });
                 }
-                
+
                 // Clear any existing token to force fresh authentication
                 log.debug('DEBUG', 'Clearing existing token and forcing refresh...');
-                tokenRecord.setValue({fieldId: 'custrecord_hyc_fedex_access_token', value: ''});
-                tokenRecord.setValue({fieldId: 'custrecord_hyc_fedex_expiration', value: ''});
+                tokenRecord.setValue({ fieldId: 'custrecord_hyc_fedex_access_token', value: '' });
+                tokenRecord.setValue({ fieldId: 'custrecord_hyc_fedex_expiration', value: '' });
                 tokenRecord.save();
-                
+
                 // Force token refresh to ensure new credentials are used
                 log.debug('DEBUG', 'Refreshing token with new credentials...');
                 var refreshResult = refreshToken(tokenRecord);
-                
+
                 // Get the actual bearer token from the refreshed record
                 var bearerToken = '';
                 if (refreshResult) {
                     // refreshToken returns the updated record, so get token from it
-                    bearerToken = refreshResult.getValue({fieldId: 'custrecord_hyc_fedex_access_token'}) || '';
+                    bearerToken = refreshResult.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' }) || '';
                     log.debug('DEBUG', 'Token refresh result: Success - Token: ' + (bearerToken ? bearerToken.substring(0, 20) + '...' : 'No token found in record'));
                 } else {
                     log.debug('DEBUG', 'Token refresh result: Failed - no record returned');
                 }
-                
+
                 if (!bearerToken) {
                     throw error.create({
                         name: 'TOKEN_REFRESH_FAILED',
                         message: 'Failed to obtain bearer token after refresh'
                     });
                 }
-                
+
                 var apiUrl = getApiUrl();
                 apiUrl += 'ship/v1/shipments';
 
                 log.audit('FedEx API Call', 'URL: ' + apiUrl);
                 log.debug('FedEx Payload', JSON.stringify(payload, null, 2));
-                
+
                 // Enhanced debugging for field validation
                 log.debug('FedEx Shipper Details', JSON.stringify(payload.requestedShipment.shipper, null, 2));
                 log.debug('FedEx Recipient Details', JSON.stringify(payload.requestedShipment.recipients[0], null, 2));
@@ -1123,12 +1194,12 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 log.debug('FedEx Service Info', 'Service: ' + payload.requestedShipment.serviceType + ', Packaging: ' + payload.requestedShipment.packagingType + ', Pickup: ' + payload.requestedShipment.pickupType);
                 log.debug('FedEx Ship Date', 'Date: ' + payload.requestedShipment.shipDatestamp);
                 log.debug('FedEx Account Number', 'Account: ' + payload.accountNumber.value);
-                
+
                 // Check for potential validation issues
                 var shipper = payload.requestedShipment.shipper;
                 var recipient = payload.requestedShipment.recipients[0];
                 var package = payload.requestedShipment.requestedPackageLineItems[0];
-                
+
                 // Phone number validation
                 if (shipper.contact.phoneNumber) {
                     log.debug('Shipper Phone Validation', 'Phone: "' + shipper.contact.phoneNumber + '", Length: ' + shipper.contact.phoneNumber.length + ', Is Numeric: ' + /^\d+$/.test(shipper.contact.phoneNumber));
@@ -1136,16 +1207,16 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 if (recipient.contact.phoneNumber) {
                     log.debug('Recipient Phone Validation', 'Phone: "' + recipient.contact.phoneNumber + '", Length: ' + recipient.contact.phoneNumber.length + ', Is Numeric: ' + /^\d+$/.test(recipient.contact.phoneNumber));
                 }
-                
+
                 // Weight/dimension validation
                 log.debug('Package Weight Validation', 'Weight: ' + package.weight.value + ' ' + package.weight.units);
                 log.debug('Package Dimension Validation', 'Dimensions: ' + package.dimensions.length + 'x' + package.dimensions.width + 'x' + package.dimensions.height + ' ' + package.dimensions.units);
-                
+
                 // Date validation
                 var today = new Date();
                 var shipDate = new Date(payload.requestedShipment.shipDatestamp);
                 log.debug('Date Validation', 'Ship Date: ' + payload.requestedShipment.shipDatestamp + ', Today: ' + today.toISOString().split('T')[0] + ', Valid: ' + (shipDate >= today));
-                
+
                 // Reference validation
                 if (package.customerReferences) {
                     for (var r = 0; r < package.customerReferences.length; r++) {
@@ -1187,12 +1258,12 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     var shipments = response.result.output.transactionShipments;
                     if (shipments.length > 0) {
                         var firstShipment = shipments[0];
-                        
+
                         // Extract tracking number
                         if (firstShipment.masterTrackingNumber) {
                             trackingNumber = firstShipment.masterTrackingNumber;
                         }
-                        
+
                         // Extract label URLs from all piece responses
                         if (firstShipment.pieceResponses && firstShipment.pieceResponses.length > 0) {
                             for (var i = 0; i < firstShipment.pieceResponses.length; i++) {
@@ -1209,13 +1280,13 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 }
                             }
                         }
-                        
+
                         // Extract alerts for error message field
                         if (firstShipment.alerts && firstShipment.alerts.length > 0) {
                             alertsJson = JSON.stringify(firstShipment.alerts);
                         }
                     }
-                    
+
                     // Extract transaction ID from top level
                     if (response.result.transactionId) {
                         transactionId = response.result.transactionId;
@@ -1225,10 +1296,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Join multiple label URLs with comma
                 var labelUrlString = labelUrls.join(',');
 
-                log.debug('FedEx Response Processing', 'Tracking: ' + trackingNumber + 
-                         ', Labels: ' + labelUrlString + 
-                         ', Transaction ID: ' + transactionId +
-                         ', Alerts: ' + alertsJson);
+                log.debug('FedEx Response Processing', 'Tracking: ' + trackingNumber +
+                    ', Labels: ' + labelUrlString +
+                    ', Transaction ID: ' + transactionId +
+                    ', Alerts: ' + alertsJson);
 
                 // Update the fulfillment record with results (in test mode, just log)
                 if (!testMode) {
@@ -1238,26 +1309,26 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         custbody_shipment_transaction_id: transactionId,
                         custbody_shipping_api_response: JSON.stringify(response.result)
                     };
-                    
+
                     // Only add error message if there are alerts
                     if (alertsJson) {
                         updateValues.custbody_shipping_error_message = alertsJson;
                     }
-                    
+
                     record.submitFields({
                         type: record.Type.ITEM_FULFILLMENT,
                         id: fulfillmentRecord.id,
                         values: updateValues
                     });
-                    
+
                     // Update package tracking numbers - need to reload record for packages
                     if (trackingNumber) {
                         var recordForUpdate = record.load({
                             type: record.Type.ITEM_FULFILLMENT,
                             id: fulfillmentRecord.id
                         });
-                        
-                        var packageCount = recordForUpdate.getLineCount({sublistId: 'package'});
+
+                        var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
                         if (packageCount > 0) {
                             recordForUpdate.setSublistValue({
                                 sublistId: 'package',
