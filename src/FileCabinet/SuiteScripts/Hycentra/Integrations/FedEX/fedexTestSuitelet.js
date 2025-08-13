@@ -73,33 +73,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                     help: 'Override Reference 2 field for the label (max 30 characters). If blank, will use Customer PO.'
                 });
 
-                // Add service type override
-                var serviceField = form.addField({
-                    id: 'custpage_service_type',
-                    type: serverWidget.FieldType.SELECT,
-                    label: 'FedEx Service Type (Optional Override)',
-                    container: 'custpage_references_group'
-                });
-                serviceField.addSelectOption({
-                    value: '',
-                    text: '-- Use Default Based on Ship Method --'
-                });
-                serviceField.addSelectOption({
-                    value: 'FEDEX_GROUND',
-                    text: 'FedEx Ground'
-                });
-                serviceField.addSelectOption({
-                    value: 'FEDEX_PRIORITY_OVERNIGHT',
-                    text: 'FedEx Priority Overnight'
-                });
-                serviceField.addSelectOption({
-                    value: 'FEDEX_2_DAY',
-                    text: 'FedEx 2Day'
-                });
-                serviceField.addSelectOption({
-                    value: 'FEDEX_EXPRESS_SAVER',
-                    text: 'FedEx Express Saver'
-                });
+
 
                 // Add test mode checkbox
                 var testModeField = form.addField({
@@ -107,7 +81,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                     type: serverWidget.FieldType.CHECKBOX,
                     label: 'Test Mode (Use Sandbox API)'
                 });
-                //testModeField.defaultValue = 'T';
+                testModeField.defaultValue = 'T';
                 testModeField.setHelpText({
                     help: 'When checked, uses FedEx sandbox environment for testing'
                 });
@@ -371,7 +345,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                 var fulfillmentId = request.parameters.custpage_item_fulfillment;
                 var reference1Override = request.parameters.custpage_reference1;
                 var reference2Override = request.parameters.custpage_reference2;
-                var serviceTypeOverride = request.parameters.custpage_service_type;
+
                 var testMode = request.parameters.custpage_test_mode === 'T';
 
                 if (!fulfillmentId) {
@@ -405,7 +379,7 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
                 }
 
                 // Create FedEx shipment
-                var result = createShipment(fulfillmentRecord, serviceTypeOverride, testMode);
+                var result = createShipment(fulfillmentRecord, testMode);
 
                 // Redirect to results page
                 var resultUrl = url.resolveScript({
@@ -452,13 +426,12 @@ define(['N/ui/serverWidget', 'N/record', 'N/search', 'N/log', 'N/redirect', 'N/u
          * Create test shipment using helper class
          * 
          * @param {Record} fulfillmentRecord
-         * @param {string} serviceTypeOverride
          * @param {boolean} testMode
          * @returns {Object}
          */
-        function createShipment(fulfillmentRecord, serviceTypeOverride, testMode) {
+        function createShipment(fulfillmentRecord, testMode) {
             // Delegate to helper class for actual shipment creation
-            return fedexHelper.createShipment(fulfillmentRecord, serviceTypeOverride, testMode);
+            return fedexHelper.createShipment(fulfillmentRecord, testMode);
         }
 
         /**
