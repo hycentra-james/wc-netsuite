@@ -1114,11 +1114,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * Create FedEx shipment
          * 
          * @param {record} fulfillmentRecord The Item Fulfillment record
-         * @param {string} serviceTypeOverride Optional service type override
          * @param {boolean} testMode Whether to run in test mode (no record updates)
          * @returns {Object} Shipment creation result
          */
-        function createShipment(fulfillmentRecord, serviceTypeOverride, testMode) {
+        function createShipment(fulfillmentRecord, testMode) {
             try {
                 // Set the module-level test mode flag
                 IS_TEST_MODE = testMode || false;
@@ -1126,11 +1125,6 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 
                 // Build shipment payload
                 var payload = buildShipmentPayload(fulfillmentRecord);
-
-                // Apply service type override if provided
-                if (serviceTypeOverride) {
-                    payload.requestedShipment.serviceType = serviceTypeOverride;
-                }
 
                 // Get API configuration and force token refresh
                 var tokenRecord = getTokenRecord();
@@ -1302,53 +1296,52 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     ', Alerts: ' + alertsJson);
 
                 // Update the fulfillment record with results (in test mode, just log)
-                if (!testMode) {
-                    // For non-test mode, update the actual record with generic fields
-                    var updateValues = {
-                        custbody_shipping_label_url: labelUrlString,
-                        custbody_shipment_transaction_id: transactionId,
-                        custbody_shipping_api_response: JSON.stringify(response.result)
-                    };
+                
+                // For non-test mode, update the actual record with generic fields
+                var updateValues = {
+                    custbody_shipping_label_url: labelUrlString,
+                    custbody_shipment_transaction_id: transactionId,
+                    custbody_shipping_api_response: JSON.stringify(response.result)
+                };
 
-                    // Only add error message if there are alerts
-                    if (alertsJson) {
-                        updateValues.custbody_shipping_error_message = alertsJson;
-                    }
+                // Only add error message if there are alerts
+                if (alertsJson) {
+                    updateValues.custbody_shipping_error_message = alertsJson;
+                }
 
-                    record.submitFields({
+                record.submitFields({
+                    type: record.Type.ITEM_FULFILLMENT,
+                    id: fulfillmentRecord.id,
+                    values: updateValues
+                });
+
+                // Update package tracking numbers - need to reload record for packages
+                if (trackingNumber) {
+                    var recordForUpdate = record.load({
                         type: record.Type.ITEM_FULFILLMENT,
-                        id: fulfillmentRecord.id,
-                        values: updateValues
+                        id: fulfillmentRecord.id
                     });
 
-                    // Update package tracking numbers - need to reload record for packages
-                    if (trackingNumber) {
-                        var recordForUpdate = record.load({
-                            type: record.Type.ITEM_FULFILLMENT,
-                            id: fulfillmentRecord.id
+                    var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
+                    if (packageCount > 0) {
+                        recordForUpdate.setSublistValue({
+                            sublistId: 'package',
+                            fieldId: 'packagetrackingnumber',
+                            line: 0,
+                            value: trackingNumber
                         });
-
-                        var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
-                        if (packageCount > 0) {
-                            recordForUpdate.setSublistValue({
-                                sublistId: 'package',
-                                fieldId: 'packagetrackingnumber',
-                                line: 0,
-                                value: trackingNumber
-                            });
-                            recordForUpdate.save();
-                        }
+                        recordForUpdate.save();
                     }
-                } else {
-                    // In test mode, just log the values that would be updated
-                    log.audit('Test Mode - Would Update Fields', JSON.stringify({
-                        custbody_shipping_label_url: labelUrlString,
-                        custbody_shipment_transaction_id: transactionId,
-                        custbody_shipping_api_response: 'Full API Response (truncated for log)',
-                        custbody_shipping_error_message: alertsJson,
-                        packagetrackingnumber: trackingNumber
-                    }));
                 }
+            
+                // In test mode, just log the values that would be updated
+                log.audit('Test Mode - Would Update Fields', JSON.stringify({
+                    custbody_shipping_label_url: labelUrlString,
+                    custbody_shipment_transaction_id: transactionId,
+                    custbody_shipping_api_response: 'Full API Response (truncated for log)',
+                    custbody_shipping_error_message: alertsJson,
+                    packagetrackingnumber: trackingNumber
+                }));
 
                 return {
                     success: true,
