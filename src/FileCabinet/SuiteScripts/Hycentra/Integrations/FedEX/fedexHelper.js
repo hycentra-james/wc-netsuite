@@ -7,8 +7,9 @@
 define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search'],
     function (runtime, record, format, https, error, log, file, search) {
         const CONFIG_RECORD_TYPE = 'customrecord_hyc_fedex_config';
-        const SANDBOX_CONFIG_RECORD_ID = 1; // TODO: Change this Record ID after production for FedEx
-        const PRODUCTION_CONFIG_RECORD_ID = 2; // TODO: Change this Record ID after production for FedEx
+        const SANDBOX_CONFIG_RECORD_ID = 1; // FedEx Sandbox config record ID [See Custom Record: customrecord_hyc_fedex_config]
+        const PRODUCTION_CONFIG_RECORD_ID = 2; // FedEx Production config record ID [See Custom Record: customrecord_hyc_fedex_config]
+        const WC_FEDEX_MAPPING_RECORD_ID = 10; // HYC Shipping Label Mapping List (Default Account to use WC FedEx account) [See Custom Record: customrecord_hyc_shipping_label_mapping]
         
         // Module-level variable to store test mode flag
         var IS_TEST_MODE = false;
@@ -345,10 +346,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     log.debug('DEBUG', 'getShippingLabelMapping()::Missing customerId or shipMethodId, using fallback record ID 10');
                 }
 
-                // Fallback to record ID 10
+                // Fallback to record ID WC_FEDEX_MAPPING_RECORD_ID
                 var fallbackRecord = record.load({
                     type: 'customrecord_hyc_shipping_label_mapping',
-                    id: 10
+                    id: WC_FEDEX_MAPPING_RECORD_ID
                 });
 
                 // Convert to search result format for consistency
@@ -433,7 +434,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var accountNumber = null;
 
                 // TODO: This account number will be used for third party billing later.
-                if (mappingRecord) {
+                if (mappingRecord && mappingRecord.id !== WC_FEDEX_MAPPING_RECORD_ID) {
                     accountNumber = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
                     isBillToThirdParty = true;
                 }
@@ -948,18 +949,30 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             log.debug('DEBUG', 'getServiceType()::shipMethod = ' + shipMethodId);
             log.debug('DEBUG', 'getServiceType()::shipMethodText = ' + shipMethodText);
 
-            // Lookup Ship Item record to get display name
+            // Lookup ship code from custom record mapping
             var shipCode = '';
             if (shipMethodId) {
                 try {
-                    var shipItemRecord = record.load({
-                        type: record.Type.SHIP_ITEM,
-                        id: shipMethodId
+                    var shipMethodCodeSearch = search.create({
+                        type: 'customrecord_hyc_shipmethod_code_map',
+                        filters: [
+                            ['custrecord_hyc_shipmethod_map_shipmethod', search.Operator.ANYOF, shipMethodId]
+                        ],
+                        columns: [
+                            'custrecord_hyc_shipmethod_map_code'
+                        ]
                     });
-                    shipCode = shipItemRecord.getValue({ fieldId: 'displayname' }) || '';
-                    log.debug('DEBUG', 'getServiceType()::shipCode = ' + shipCode);
+
+                    var searchResults = shipMethodCodeSearch.run().getRange({ start: 0, end: 1 });
+                    
+                    if (searchResults && searchResults.length > 0) {
+                        shipCode = searchResults[0].getValue('custrecord_hyc_shipmethod_map_code') || '';
+                        log.debug('DEBUG', 'getServiceType()::Found ship code from mapping: ' + shipCode);
+                    } else {
+                        log.debug('DEBUG', 'getServiceType()::No ship code mapping found for ship method ID: ' + shipMethodId);
+                    }
                 } catch (e) {
-                    log.error('ERROR', 'Failed to load ship item record: ' + e.message);
+                    log.error('ERROR', 'Failed to lookup ship method code mapping: ' + e.message);
                 }
             }
 
@@ -1310,29 +1323,45 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 }
 
                 record.submitFields({
-                    type: record.Type.ITEM_FULFILLMENT,
-                    id: fulfillmentRecord.id,
-                    values: updateValues
+                     type: record.Type.ITEM_FULFILLMENT,
+                     id: fulfillmentRecord.id,
+                     values: updateValues
                 });
 
-                // Update package tracking numbers - need to reload record for packages
-                if (trackingNumber) {
-                    var recordForUpdate = record.load({
-                        type: record.Type.ITEM_FULFILLMENT,
-                        id: fulfillmentRecord.id
-                    });
+                 // Update package tracking numbers - need to reload record for packages
+                 if (trackingNumber) {
+                     var recordForUpdate = record.load({
+                         type: record.Type.ITEM_FULFILLMENT,
+                         id: fulfillmentRecord.id
+                     });
 
-                    var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
-                    if (packageCount > 0) {
-                        recordForUpdate.setSublistValue({
-                            sublistId: 'package',
-                            fieldId: 'packagetrackingnumber',
-                            line: 0,
-                            value: trackingNumber
-                        });
-                        recordForUpdate.save();
-                    }
-                }
+                     var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
+                     if (packageCount > 0) {
+                         recordForUpdate.setSublistValue({
+                             sublistId: 'package',
+                             fieldId: 'packagetrackingnumber',
+                             line: 0,
+                             value: trackingNumber
+                         });
+                         recordForUpdate.save();
+                     }
+                 }
+
+                 // Update Item Fulfillment status to "Shipped" after successful label creation and save
+                 try {
+                     log.debug('DEBUG', 'Updating Item Fulfillment status to Shipped');
+                     record.submitFields({
+                         type: record.Type.ITEM_FULFILLMENT,
+                         id: fulfillmentRecord.id,
+                         values: {
+                             shipstatus: 'C' // C = Shipped
+                         }
+                     });
+                     log.debug('DEBUG', 'Successfully updated Item Fulfillment status to Shipped');
+                 } catch (statusError) {
+                     log.error('ERROR', 'Failed to update Item Fulfillment status to Shipped: ' + statusError.message);
+                     // Don't throw error - leave status as is and continue
+                 }
             
                 // In test mode, just log the values that would be updated
                 log.audit('Test Mode - Would Update Fields', JSON.stringify({
