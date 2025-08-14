@@ -880,7 +880,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
-         * Build package line items from Item Fulfillment
+         * Build package line items from PackShip custom records
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
          * @param {Object} mappingRecord The shipping label mapping record
@@ -888,52 +888,292 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          */
         function buildPackageLineItems(fulfillmentRecord, mappingRecord) {
             var packageLineItems = [];
-            var itemCount = fulfillmentRecord.getLineCount({ sublistId: 'item' });
+            var fulfillmentId = fulfillmentRecord.id;
+            
+            log.debug('PackShip Package Build', 'Starting package build for Item Fulfillment ID: ' + fulfillmentId);
 
-            // For simplicity, create one package with total weight
-            // You can modify this to create multiple packages if needed
+            try {
+                // Step 1: Search for PackShip - Packed Item records
+                var packshipRecords = searchPackShipRecords(fulfillmentId);
+                
+                if (!packshipRecords || packshipRecords.length === 0) {
+                    throw error.create({
+                        name: 'NO_PACKSHIP_RECORDS',
+                        message: 'No PackShip - Packed Item records found for Item Fulfillment ID: ' + fulfillmentId + '. Item Fulfillment must be packed before creating FedEx shipment.'
+                    });
+                }
+                
+                log.debug('PackShip Records Found', 'Found ' + packshipRecords.length + ' PackShip records');
+
+                // Step 2: Group PackShip records by carton
+                var cartonGroups = groupPackShipByCarton(packshipRecords);
+                
+                if (Object.keys(cartonGroups).length === 0) {
+                    throw error.create({
+                        name: 'NO_CARTON_GROUPS',
+                        message: 'No valid carton groups found in PackShip records. All PackShip records must have valid carton field values (e.g., SO188659-1).'
+                    });
+                }
+                
+                log.debug('Carton Groups', 'Found ' + Object.keys(cartonGroups).length + ' carton groups: ' + Object.keys(cartonGroups).join(', '));
+
+                // Step 3: Build customer references once (same for all cartons)
+                var references = buildCustomerReferences(fulfillmentRecord, mappingRecord);
+
+                // Step 4: Create package for each carton
+                for (var cartonId in cartonGroups) {
+                    var cartonWeight = calculateCartonWeight(cartonGroups[cartonId]);
+                    var packageItem = buildCartonPackage(cartonWeight, cartonId, references);
+                    packageLineItems.push(packageItem);
+                }
+                
+                log.debug('Package Items Built', 'Created ' + packageLineItems.length + ' package items');
+
+            } catch (e) {
+                log.error('PackShip Package Build Error', e.message + '\nStack: ' + e.stack);
+                throw e;
+            }
+
+            return packageLineItems;
+        }
+
+        /**
+         * Search for PackShip - Packed Item records by Item Fulfillment ID
+         *
+         * @param {string} fulfillmentId The Item Fulfillment record ID
+         * @returns {Array} Array of PackShip record data
+         */
+        function searchPackShipRecords(fulfillmentId) {
+            try {
+                var packshipSearch = search.create({
+                    type: 'customrecord_packship_cartonitem',
+                    filters: [
+                        ['custrecord_packship_itemfulfillment', 'anyof', fulfillmentId]
+                    ],
+                    columns: [
+                        'internalid',
+                        'custrecord_packship_carton',
+                        'custrecord_packship_fulfillmentitem',
+                        'custrecord_packship_totalpackedqty',
+                        // Join to get the carton name from the PackShip - Pack Carton record
+                        search.createColumn({
+                            name: 'name',
+                            join: 'custrecord_packship_carton',
+                            label: 'Carton Name'
+                        })
+                    ]
+                });
+
+                var searchResults = packshipSearch.run().getRange({
+                    start: 0,
+                    end: 1000
+                });
+
+                var packshipRecords = [];
+                for (var i = 0; i < searchResults.length; i++) {
+                    var result = searchResults[i];
+                    var cartonRecordId = result.getValue('custrecord_packship_carton');
+                    var itemValue = result.getValue('custrecord_packship_fulfillmentitem');
+                    var quantityValue = result.getValue('custrecord_packship_totalpackedqty');
+                    
+                    // Get the actual carton name from the joined PackShip - Pack Carton record
+                    var cartonName = result.getValue({
+                        name: 'name',
+                        join: 'custrecord_packship_carton'
+                    });
+                    
+                    packshipRecords.push({
+                        id: result.getValue('internalid'),
+                        carton: cartonName, // Now using the actual carton name (e.g., "SO188659-1")
+                        cartonRecordId: cartonRecordId, // Store the carton record ID for reference
+                        item: itemValue,
+                        quantity: parseFloat(quantityValue) || 0
+                    });
+                    
+                    // Debug the corrected field values
+                    log.debug('PackShip Record Details', 'PackShip ID: ' + result.getValue('internalid') + 
+                             ', Carton Record ID: "' + cartonRecordId + '"' +
+                             ', Carton Name: "' + cartonName + '"' +
+                             ', Item: "' + itemValue + '"' +
+                             ', Quantity: "' + quantityValue + '"');
+                }
+
+                log.debug('PackShip Search Results', 'Found ' + packshipRecords.length + ' records for fulfillment ' + fulfillmentId);
+                return packshipRecords;
+
+            } catch (e) {
+                log.error('PackShip Search Error', 'Error searching PackShip records: ' + e.message);
+                throw error.create({
+                    name: 'PACKSHIP_SEARCH_ERROR',
+                    message: 'Failed to search PackShip records: ' + e.message
+                });
+            }
+        }
+
+        /**
+         * Group PackShip records by carton field
+         *
+         * @param {Array} packshipRecords Array of PackShip record data
+         * @returns {Object} Object with carton IDs as keys and arrays of records as values
+         */
+        function groupPackShipByCarton(packshipRecords) {
+            var cartonGroups = {};
+
+            for (var i = 0; i < packshipRecords.length; i++) {
+                var packshipRecord = packshipRecords[i];
+                var cartonId = packshipRecord.carton;
+
+                if (!cartonId) {
+                    log.debug('PackShip Carton Warning', 'PackShip record ID ' + packshipRecord.id + ' has no carton field value, skipping');
+                    continue;
+                }
+
+                // Convert cartonId to string and trim whitespace
+                cartonId = String(cartonId).trim();
+                
+                if (!cartonId) {
+                    log.debug('PackShip Carton Warning', 'PackShip record ID ' + packshipRecord.id + ' has empty carton name, skipping');
+                    continue;
+                }
+
+                // Now we should have the actual carton name (e.g., "SO188659-1")
+                // Validate the format - should contain alphanumeric characters
+                var isValidCarton = cartonId.length > 0 && /^[A-Za-z0-9\-_]+$/.test(cartonId);
+                
+                if (!isValidCarton) {
+                    log.debug('PackShip Carton Warning', 'PackShip record ID ' + packshipRecord.id + ' has invalid carton name format: "' + cartonId + '"');
+                    continue;
+                }
+
+                log.debug('PackShip Carton Accepted', 'Using carton name: "' + cartonId + '" for PackShip record ' + packshipRecord.id);
+
+                if (!cartonGroups[cartonId]) {
+                    cartonGroups[cartonId] = [];
+                }
+
+                // Update the record with the cleaned carton ID
+                packshipRecord.carton = cartonId;
+                cartonGroups[cartonId].push(packshipRecord);
+            }
+
+            return cartonGroups;
+        }
+
+        /**
+         * Calculate total weight for a carton based on items and their weights
+         *
+         * @param {Array} cartonRecords Array of PackShip records for this carton
+         * @returns {number} Total weight in pounds
+         */
+        function calculateCartonWeight(cartonRecords) {
             var totalWeight = 0;
 
-            for (var i = 0; i < itemCount; i++) {
-                var quantity = fulfillmentRecord.getSublistValue({
-                    sublistId: 'item',
-                    fieldId: 'quantity',
-                    line: i
-                }) || 1;
+            for (var i = 0; i < cartonRecords.length; i++) {
+                var packshipRecord = cartonRecords[i];
+                
+                if (!packshipRecord.item) {
+                    log.debug('PackShip Weight Warning', 'PackShip record ID ' + packshipRecord.id + ' has no item field, skipping weight calculation');
+                    continue;
+                }
 
-                // Get item weight (you may need to load item record for weight)
-                var itemWeight = 1; // Default weight - modify as needed
-                totalWeight += (quantity * itemWeight);
+                if (!packshipRecord.quantity || packshipRecord.quantity <= 0) {
+                    log.debug('PackShip Weight Warning', 'PackShip record ID ' + packshipRecord.id + ' has invalid quantity: ' + packshipRecord.quantity + ', skipping weight calculation');
+                    continue;
+                }
+
+                try {
+                    log.debug('PackShip Weight Debug', 'Attempting to load item ID: ' + packshipRecord.item + ' for PackShip record ' + packshipRecord.id);
+                    
+                    // Load the item record to get shipping weight
+                    // Try different item types since 'item' is not valid
+                    var itemRecord;
+                    var itemTypes = ['inventoryitem', 'kititem'];
+                    var loadSuccess = false;
+                    
+                    for (var t = 0; t < itemTypes.length; t++) {
+                        try {
+                            itemRecord = record.load({
+                                type: itemTypes[t],
+                                id: packshipRecord.item
+                            });
+                            loadSuccess = true;
+                            log.debug('PackShip Weight Debug', 'Successfully loaded item record for ID: ' + packshipRecord.item + ' using type: ' + itemTypes[t]);
+                            break;
+                        } catch (typeError) {
+                            // Continue to next type
+                            log.debug('PackShip Weight Debug', 'Failed to load item ' + packshipRecord.item + ' as ' + itemTypes[t] + ': ' + typeError.message);
+                        }
+                    }
+                    
+                    if (!loadSuccess) {
+                        throw new Error('Could not load item with any supported item type');
+                    }
+
+                    var itemWeight = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_weight' });
+                    
+                    log.debug('PackShip Weight Debug', 'Raw weight value from custitem_fmt_shipping_weight: "' + itemWeight + '" (type: ' + typeof itemWeight + ')');
+                    
+                    // Try to parse the weight value
+                    var parsedWeight = parseFloat(itemWeight);
+                    log.debug('PackShip Weight Debug', 'Parsed weight: ' + parsedWeight + ' (isNaN: ' + isNaN(parsedWeight) + ')');
+                    
+                    if (!itemWeight || itemWeight <= 0 || isNaN(parsedWeight)) {
+                        log.debug('PackShip Weight Warning', 'Item ID ' + packshipRecord.item + ' has invalid shipping weight: "' + itemWeight + '", using default weight of 1 lb');
+                        itemWeight = 1;
+                    } else {
+                        itemWeight = parsedWeight;
+                        log.debug('PackShip Weight Success', 'Item ID ' + packshipRecord.item + ' has valid shipping weight: ' + itemWeight + ' lbs');
+                    }
+
+                    var itemTotalWeight = itemWeight * packshipRecord.quantity;
+                    totalWeight += itemTotalWeight;
+
+                    log.debug('PackShip Weight Calculation', 'Item ' + packshipRecord.item + ': weight=' + itemWeight + ' lbs, qty=' + packshipRecord.quantity + ', total=' + itemTotalWeight + ' lbs');
+
+                } catch (e) {
+                    log.error('PackShip Item Load Error', 'Failed to load item ' + packshipRecord.item + ': ' + e.message + '\nStack: ' + e.stack + '\nUsing default weight of 1 lb');
+                    totalWeight += (1 * packshipRecord.quantity); // Default weight fallback
+                    log.debug('PackShip Weight Fallback', 'Added fallback weight for item ' + packshipRecord.item + ': ' + (1 * packshipRecord.quantity) + ' lbs');
+                }
             }
 
-            // Minimum weight of 1 lb
+            log.debug('PackShip Weight Summary', 'Calculated total weight for carton: ' + totalWeight + ' lbs (before minimum check)');
+
+            // Minimum weight of 1 lb per carton
             if (totalWeight < 1) {
                 totalWeight = 1;
+                log.debug('PackShip Weight Adjustment', 'Carton weight was less than 1 lb, adjusted to 1 lb minimum');
             }
 
-            // Build the package with customer references at package level
+            log.debug('PackShip Weight Final', 'Final carton weight: ' + totalWeight + ' lbs');
+            return totalWeight;
+        }
+
+        /**
+         * Build a package item for a specific carton
+         *
+         * @param {number} weight The total weight of the carton
+         * @param {string} cartonId The carton identifier (e.g., "SO188659-1")
+         * @param {Array} references The customer references to include
+         * @returns {Object} FedEx package item object
+         */
+        function buildCartonPackage(weight, cartonId, references) {
+            log.debug('Building Carton Package', 'Carton: ' + cartonId + ', Weight: ' + weight + ' lbs');
+
             var packageItem = {
                 "weight": {
                     "units": "LB",
-                    "value": totalWeight
-                },
-                "dimensions": {
-                    "length": 12,
-                    "width": 12,
-                    "height": 6,
-                    "units": "IN"
+                    "value": weight
                 }
+                // Note: Dimensions will be added later per user request
             };
 
             // Add customer references to the package (FedEx requires them at package level)
-            var references = buildCustomerReferences(fulfillmentRecord, mappingRecord);
             if (references && references.length > 0) {
                 packageItem.customerReferences = references;
             }
 
-            packageLineItems.push(packageItem);
-
-            return packageLineItems;
+            return packageItem;
         }
 
         /**
@@ -1217,7 +1457,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 // Weight/dimension validation
                 log.debug('Package Weight Validation', 'Weight: ' + package.weight.value + ' ' + package.weight.units);
-                log.debug('Package Dimension Validation', 'Dimensions: ' + package.dimensions.length + 'x' + package.dimensions.width + 'x' + package.dimensions.height + ' ' + package.dimensions.units);
+                // log.debug('Package Dimension Validation', 'Dimensions: ' + package.dimensions.length + 'x' + package.dimensions.width + 'x' + package.dimensions.height + ' ' + package.dimensions.units);
 
                 // Date validation
                 var today = new Date();
