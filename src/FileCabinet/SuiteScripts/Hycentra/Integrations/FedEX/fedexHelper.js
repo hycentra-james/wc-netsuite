@@ -367,6 +367,59 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Get dynamic account number for API based on customer and PO prefix
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} mappingRecord The shipping label mapping record
+         * @returns {string} Account number to use for FedEx API
+         */
+        function getDynamicAccountNumber(fulfillmentRecord, mappingRecord) {
+            try {
+                // Get customer ID from fulfillment record
+                var customerId = fulfillmentRecord.getValue({ fieldId: 'entity' });
+                log.debug('Dynamic Account', 'Customer ID: ' + customerId);
+                
+                // Check if this is Wayfair (customer ID 329)
+                if (customerId == 329) {
+                    log.debug('Dynamic Account', 'Wayfair customer detected, checking PO prefix logic');
+                    
+                    // Get PO number from fulfillment record
+                    var poNumber = fulfillmentRecord.getValue({ fieldId: 'custbody_sd_customer_po_no' });
+                    log.debug('Dynamic Account', 'PO Number: ' + poNumber);
+                    
+                    if (poNumber) {
+                        // Get account mapping JSON from mapping record
+                        var accountMappingJson = mappingRecord.getValue({ fieldId: 'custrecord_hyc_ship_lbl_account_no' });
+                        log.debug('Dynamic Account', 'Account mapping JSON: ' + accountMappingJson);
+                        
+                        if (accountMappingJson) {
+                            var accountMapping = JSON.parse(accountMappingJson);
+                            
+                            // Check PO prefix and return corresponding account number
+                            if (poNumber.indexOf('CS') === 0) {
+                                log.debug('Dynamic Account', 'PO starts with CS, using account: ' + accountMapping.CS);
+                                return accountMapping.CS;
+                            } else if (poNumber.indexOf('CA') === 0) {
+                                log.debug('Dynamic Account', 'PO starts with CA, using account: ' + accountMapping.CA);
+                                return accountMapping.CA;
+                            }
+                        }
+                    }
+                }
+                
+                // For non-Wayfair customers or if no mapping found, use the standard account from mapping record
+                var standardAccount = mappingRecord.getValue({ fieldId: 'custrecord_hyc_ship_lbl_account_no' });
+                log.debug('Dynamic Account', 'Using standard account: ' + standardAccount);
+                return standardAccount;
+                
+            } catch (e) {
+                log.error('Dynamic Account Error', 'Error getting dynamic account number: ' + e.message);
+                // Fallback to mapping record account
+                return mappingRecord.getValue({ fieldId: 'custrecord_hyc_ship_lbl_account_no' });
+            }
+        }
+
+        /**
          * Build shipping charges payment section
          *
          * @param {boolean} isBillToThirdParty Whether to bill to third party
@@ -448,7 +501,11 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 }
                 
                 // Use wcAccountNumber in test mode, otherwise use accountNumber
-                var billingAccountNumber = IS_TEST_MODE ? wcAccountNumber : accountNumber;
+                var billingAccountNumber = IS_TEST_MODE ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
+                
+                // Get dynamic account number for API (separate from billing)
+                //var apiAccountNumber = IS_TEST_MODE ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
+                log.debug('Billing Account Numbers', 'wcAccountNumber: ' + wcAccountNumber + ', Billing Account: ' + billingAccountNumber);
 
                 // Build the payload - match FedEx example structure
                 var payload = {
