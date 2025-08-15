@@ -389,7 +389,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     
                     if (poNumber) {
                         // Get account mapping JSON from mapping record
-                        var accountMappingJson = mappingRecord.getValue({ fieldId: 'custrecord_hyc_ship_lbl_account_no' });
+                        var accountMappingJson = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
                         log.debug('Dynamic Account', 'Account mapping JSON: ' + accountMappingJson);
                         
                         if (accountMappingJson) {
@@ -408,14 +408,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 }
                 
                 // For non-Wayfair customers or if no mapping found, use the standard account from mapping record
-                var standardAccount = mappingRecord.getValue({ fieldId: 'custrecord_hyc_ship_lbl_account_no' });
+                var standardAccount = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
                 log.debug('Dynamic Account', 'Using standard account: ' + standardAccount);
                 return standardAccount;
                 
             } catch (e) {
                 log.error('Dynamic Account Error', 'Error getting dynamic account number: ' + e.message);
                 // Fallback to mapping record account
-                return mappingRecord.getValue({ fieldId: 'custrecord_hyc_ship_lbl_account_no' });
+                return mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
             }
         }
 
@@ -628,8 +628,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             log.debug('Shipping Address Success', 'Using shippingaddress subrecord');
                             return {
                                 "contact": {
-                                    "personName": fulfillmentRecord.getText({ fieldId: 'entity' }) || 'Customer',
-                                    "phoneNumber": WC_PHONE_NUMBER
+                                    "personName": shippingAddressSubrecord.getValue({ fieldId: 'attention' }) || 'Customer',
+                                    "phoneNumber": shippingAddressSubrecord.getValue({ fieldId: 'addrphone' }) || '9999999999'
                                 },
                                 "address": {
                                     "streetLines": streetLines,
@@ -1353,17 +1353,18 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         throw new Error('Could not load item with any supported item type');
                     }
 
-                    var itemWeight = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_weight' });
+                    var itemWeight = itemRecord.getValue({ fieldId: 'weight' });
                     
-                    log.debug('PackShip Weight Debug', 'Raw weight value from custitem_fmt_shipping_weight: "' + itemWeight + '" (type: ' + typeof itemWeight + ')');
+                    log.debug('PackShip Weight Debug', 'Raw weight value from weight: "' + itemWeight + '" (type: ' + typeof itemWeight + ')');
                     
                     // Try to parse the weight value
                     var parsedWeight = parseFloat(itemWeight);
                     log.debug('PackShip Weight Debug', 'Parsed weight: ' + parsedWeight + ' (isNaN: ' + isNaN(parsedWeight) + ')');
                     
                     if (!itemWeight || itemWeight <= 0 || isNaN(parsedWeight)) {
-                        log.debug('PackShip Weight Warning', 'Item ID ' + packshipRecord.item + ' has invalid shipping weight: "' + itemWeight + '", using default weight of 1 lb');
-                        itemWeight = 1;
+                        // We are not going to use the default item Weight
+                        // log.debug('PackShip Weight Warning', 'Item ID ' + packshipRecord.item + ' has invalid shipping weight: "' + itemWeight + '", using default weight of 1 lb');
+                        //itemWeight = 1;
                     } else {
                         itemWeight = parsedWeight;
                         log.debug('PackShip Weight Success', 'Item ID ' + packshipRecord.item + ' has valid shipping weight: ' + itemWeight + ' lbs');
@@ -1376,7 +1377,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 } catch (e) {
                     log.error('PackShip Item Load Error', 'Failed to load item ' + packshipRecord.item + ': ' + e.message + '\nStack: ' + e.stack + '\nUsing default weight of 1 lb');
-                    totalWeight += (1 * packshipRecord.quantity); // Default weight fallback
+                    // totalWeight += (1 * packshipRecord.quantity); // Default weight fallback
                     log.debug('PackShip Weight Fallback', 'Added fallback weight for item ' + packshipRecord.item + ': ' + (1 * packshipRecord.quantity) + ' lbs');
                 }
             }
