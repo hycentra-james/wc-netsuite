@@ -10,6 +10,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         const SANDBOX_CONFIG_RECORD_ID = 1; // FedEx Sandbox config record ID [See Custom Record: customrecord_hyc_fedex_config]
         const PRODUCTION_CONFIG_RECORD_ID = 2; // FedEx Production config record ID [See Custom Record: customrecord_hyc_fedex_config]
         const WC_FEDEX_MAPPING_RECORD_ID = 10; // HYC Shipping Label Mapping List (Default Account to use WC FedEx account) [See Custom Record: customrecord_hyc_shipping_label_mapping]
+        const WC_PHONE_NUMBER = '9097731777';
         
         // Module-level variable to store test mode flag
         var IS_TEST_MODE = false;
@@ -516,7 +517,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 "contact": {
                     "personName": "Shipping Department",
                     "emailAddress": "orders@watercreation.com",
-                    "phoneNumber": "9097731777",
+                    "phoneNumber": WC_PHONE_NUMBER,
                     "companyName": companyInfo
                 },
                 "address": {
@@ -536,56 +537,154 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {Object} Recipient information
          */
         function buildRecipientInfo(fulfillmentRecord) {
-            // Primary approach: Extract address from Sales Order JSON payload
+            log.debug('buildRecipientInfo', 'Building recipient information');
+            
             try {
-                var salesOrderId = fulfillmentRecord.getValue({ fieldId: 'createdfrom' });
-                if (salesOrderId) {
-                    log.debug('DEBUG', 'buildRecipientInfo()::salesOrderId = ' + salesOrderId);
-
-                    var salesOrderRecord = record.load({
-                        type: record.Type.SALES_ORDER,
-                        id: salesOrderId
-                    });
-
-                    var jsonPayload = salesOrderRecord.getValue({ fieldId: 'custbody_lb_sourced_data' });
-                    if (jsonPayload) {
-                        log.debug('DEBUG', 'buildRecipientInfo()::jsonPayload = ' + jsonPayload);
-
-                        var parsedData = JSON.parse(jsonPayload);
-                        if (parsedData && parsedData.packSlipFields && parsedData.packSlipFields.ShipTo) {
-                            var shipTo = parsedData.packSlipFields.ShipTo;
-
-                            var streetLines = [];
-                            if (shipTo.Address1) streetLines.push(shipTo.Address1);
-                            if (shipTo.Address2) streetLines.push(shipTo.Address2);
-
+                // FIRST TRY: Access shippingaddress as a subrecord
+                try {
+                    var shippingAddressSubrecord = fulfillmentRecord.getSubrecord({ fieldId: 'shippingaddress' });
+                    if (shippingAddressSubrecord) {
+                        var addr1 = shippingAddressSubrecord.getValue({ fieldId: 'addr1' });
+                        var addr2 = shippingAddressSubrecord.getValue({ fieldId: 'addr2' });
+                        var city = shippingAddressSubrecord.getValue({ fieldId: 'city' });
+                        var state = shippingAddressSubrecord.getValue({ fieldId: 'state' });
+                        var zip = shippingAddressSubrecord.getValue({ fieldId: 'zip' });
+                        var countryId = shippingAddressSubrecord.getValue({ fieldId: 'country' });
+                        
+                        // Convert country ID to country code if needed
+                        var countryCode = "US"; // Default
+                        if (countryId) {
+                            try {
+                                var countryRecord = record.load({ type: 'country', id: countryId });
+                                countryCode = countryRecord.getValue({ fieldId: 'countrycode' }) || "US";
+                            } catch (countryError) {
+                                log.debug('Country Lookup Warning', 'Could not load country ID: ' + countryId + ', using default US');
+                            }
+                        }
+                        
+                        if (addr1 && city && state && zip) {
+                            var streetLines = [addr1];
+                            if (addr2) {
+                                streetLines.push(addr2);
+                            }
+                            
+                            log.debug('Shipping Address Success', 'Using shippingaddress subrecord');
                             return {
                                 "contact": {
-                                    "personName": shipTo.CompanyName || 'Customer',
-                                    "phoneNumber": shipTo.Phone || '9097731777'
+                                    "personName": fulfillmentRecord.getText({ fieldId: 'entity' }) || 'Customer',
+                                    "phoneNumber": WC_PHONE_NUMBER
                                 },
                                 "address": {
-                                    "streetLines": streetLines.length > 0 ? streetLines : ["Address Not Available"],
-                                    "city": shipTo.City || 'Unknown',
-                                    "stateOrProvinceCode": shipTo.State || 'XX',
-                                    "postalCode": shipTo.Zip || '00000',
-                                    "countryCode": shipTo.Country || 'US',
+                                    "streetLines": streetLines,
+                                    "city": city,
+                                    "stateOrProvinceCode": state,
+                                    "postalCode": zip,
+                                    "countryCode": countryCode,
                                     "residential": fulfillmentRecord.getValue({ fieldId: 'shipisresidential' })
                                 }
                             };
                         }
                     }
+                } catch (subrecordError) {
+                    log.debug('Shipping Address Subrecord Warning', 'Could not access shippingaddress as subrecord: ' + subrecordError.message);
                 }
+                
+                // SECOND TRY: Parse custbody_lb_sourced_data JSON from fulfillment record
+                try {
+                    var lbSourcedData = fulfillmentRecord.getValue({ fieldId: 'custbody_lb_sourced_data' });
+                    if (lbSourcedData) {
+                        var lbData = JSON.parse(lbSourcedData);
+                        var shipTo = null;
+                        
+                        // Try different JSON structures
+                        if (lbData.ShipTo) {
+                            shipTo = lbData.ShipTo;
+                        } else if (lbData.packSlipFields && lbData.packSlipFields.ShipTo) {
+                            shipTo = lbData.packSlipFields.ShipTo;
+                        }
+                        
+                        if (shipTo && shipTo.Address1 && shipTo.City && shipTo.State && shipTo.Zip) {
+                            var streetLines = [shipTo.Address1];
+                            if (shipTo.Address2) {
+                                streetLines.push(shipTo.Address2);
+                            }
+                            
+                            log.debug('LB Sourced Data Success', 'Using custbody_lb_sourced_data JSON from fulfillment');
+                            return {
+                                "contact": {
+                                    "personName": shipTo.CompanyName || 'Customer',
+                                    "phoneNumber": shipTo.Phone || WC_PHONE_NUMBER
+                                },
+                                "address": {
+                                    "streetLines": streetLines,
+                                    "city": shipTo.City,
+                                    "stateOrProvinceCode": shipTo.State,
+                                    "postalCode": shipTo.Zip,
+                                    "countryCode": shipTo.Country || "US",
+                                    "residential": fulfillmentRecord.getValue({ fieldId: 'shipisresidential' })
+                                }
+                            };
+                        }
+                    }
+                } catch (jsonError) {
+                    log.debug('LB Sourced Data Warning', 'Could not parse custbody_lb_sourced_data from fulfillment: ' + jsonError.message);
+                }
+                
+                // THIRD TRY: Extract address from Sales Order JSON payload (existing logic)
+                try {
+                    var salesOrderId = fulfillmentRecord.getValue({ fieldId: 'createdfrom' });
+                    if (salesOrderId) {
+                        log.debug('DEBUG', 'buildRecipientInfo()::salesOrderId = ' + salesOrderId);
+
+                        var salesOrderRecord = record.load({
+                            type: record.Type.SALES_ORDER,
+                            id: salesOrderId
+                        });
+
+                        var jsonPayload = salesOrderRecord.getValue({ fieldId: 'custbody_lb_sourced_data' });
+                        if (jsonPayload) {
+                            log.debug('DEBUG', 'buildRecipientInfo()::jsonPayload = ' + jsonPayload);
+
+                            var parsedData = JSON.parse(jsonPayload);
+                            if (parsedData && parsedData.packSlipFields && parsedData.packSlipFields.ShipTo) {
+                                var shipTo = parsedData.packSlipFields.ShipTo;
+
+                                var streetLines = [];
+                                if (shipTo.Address1) streetLines.push(shipTo.Address1);
+                                if (shipTo.Address2) streetLines.push(shipTo.Address2);
+
+                                log.debug('Sales Order JSON Success', 'Using custbody_lb_sourced_data from Sales Order');
+                                return {
+                                    "contact": {
+                                        "personName": shipTo.CompanyName || 'Customer',
+                                        "phoneNumber": shipTo.Phone || WC_PHONE_NUMBER
+                                    },
+                                    "address": {
+                                        "streetLines": streetLines.length > 0 ? streetLines : ["Address Not Available"],
+                                        "city": shipTo.City || 'Unknown',
+                                        "stateOrProvinceCode": shipTo.State || 'XX',
+                                        "postalCode": shipTo.Zip || '00000',
+                                        "countryCode": shipTo.Country || 'US',
+                                        "residential": fulfillmentRecord.getValue({ fieldId: 'shipisresidential' })
+                                    }
+                                };
+                            }
+                        }
+                    }
+                } catch (e) {
+                    log.error('ERROR', 'Failed to extract address from Sales Order JSON: ' + e.message);
+                }
+                
             } catch (e) {
-                log.error('ERROR', 'Failed to extract address from Sales Order JSON: ' + e.message);
+                log.error('Error building recipient info', e.toString());
             }
 
-            // Final fallback: Use customer information
-            log.debug('DEBUG', 'Using customer fallback for recipient address');
+            // FINAL FALLBACK: Use generic customer information
+            log.debug('Address Fallback', 'Using generic fallback address');
             return {
                 "contact": {
                     "personName": fulfillmentRecord.getText({ fieldId: 'entity' }) || 'Customer',
-                    "phoneNumber": ""
+                    "phoneNumber": WC_PHONE_NUMBER
                 },
                 "address": {
                     "streetLines": ["Address Not Available"],
@@ -735,7 +834,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 return {
                     "contact": {
                         "personName": "Customer",
-                        "phoneNumber": ""
+                        "phoneNumber": WC_PHONE_NUMBER
                     },
                     "address": {
                         "streetLines": ["Address Parsing Failed"],
@@ -923,7 +1022,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Step 4: Create package for each carton
                 for (var cartonId in cartonGroups) {
                     var cartonWeight = calculateCartonWeight(cartonGroups[cartonId]);
-                    var packageItem = buildCartonPackage(cartonWeight, cartonId, references);
+                    var cartonDimensions = calculateCartonDimensions(cartonGroups[cartonId]);
+                    var packageItem = buildCartonPackage(cartonWeight, cartonId, references, cartonDimensions);
                     packageLineItems.push(packageItem);
                 }
                 
@@ -1060,6 +1160,93 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Calculate carton dimensions by finding the item with largest volume
+         *
+         * @param {Array} packshipRecords Array of PackShip records for this carton
+         * @returns {Object} Dimensions object with length, width, height in inches
+         */
+        function calculateCartonDimensions(packshipRecords) {
+            log.debug('Carton Dimensions Calculation', 'Calculating dimensions for ' + packshipRecords.length + ' items');
+            
+            var largestVolume = 0;
+            var bestDimensions = { length: 0, width: 0, height: 0 };
+            
+            for (var i = 0; i < packshipRecords.length; i++) {
+                var packshipRecord = packshipRecords[i];
+                
+                if (!packshipRecord.item) {
+                    log.debug('Dimension Warning', 'PackShip record ID ' + packshipRecord.id + ' has no item, skipping');
+                    continue;
+                }
+                
+                try {
+                    log.debug('Dimension Debug', 'Loading item ID: ' + packshipRecord.item + ' for dimensions');
+                    
+                    // Load the item record to get dimensions
+                    var itemRecord;
+                    var itemTypes = ['inventoryitem', 'kititem'];
+                    var loadSuccess = false;
+                    
+                    for (var t = 0; t < itemTypes.length; t++) {
+                        try {
+                            itemRecord = record.load({
+                                type: itemTypes[t],
+                                id: packshipRecord.item
+                            });
+                            loadSuccess = true;
+                            log.debug('Dimension Debug', 'Successfully loaded item ' + packshipRecord.item + ' as ' + itemTypes[t]);
+                            break;
+                        } catch (typeError) {
+                            log.debug('Dimension Debug', 'Failed to load item ' + packshipRecord.item + ' as ' + itemTypes[t]);
+                        }
+                    }
+                    
+                    if (!loadSuccess) {
+                        log.debug('Dimension Warning', 'Could not load item ' + packshipRecord.item + ' with any item type, using 0x0x0');
+                        continue;
+                    }
+                    
+                    // Get dimension fields
+                    var itemWidth = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_width' });
+                    var itemLength = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_length' });
+                    var itemHeight = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_height' });
+                    
+                    log.debug('Dimension Debug', 'Item ' + packshipRecord.item + ' raw dimensions: W=' + itemWidth + ', L=' + itemLength + ', H=' + itemHeight);
+                    
+                    // Parse and validate dimensions
+                    var parsedWidth = parseFloat(itemWidth) || 0;
+                    var parsedLength = parseFloat(itemLength) || 0;
+                    var parsedHeight = parseFloat(itemHeight) || 0;
+                    
+                    log.debug('Dimension Debug', 'Item ' + packshipRecord.item + ' parsed dimensions: W=' + parsedWidth + ', L=' + parsedLength + ', H=' + parsedHeight);
+                    
+                    // Calculate volume
+                    var volume = parsedWidth * parsedLength * parsedHeight;
+                    
+                    log.debug('Dimension Calculation', 'Item ' + packshipRecord.item + ': volume=' + volume + ' cubic inches');
+                    
+                    // Check if this is the largest volume so far
+                    if (volume > largestVolume) {
+                        largestVolume = volume;
+                        bestDimensions = {
+                            length: parsedLength,
+                            width: parsedWidth,
+                            height: parsedHeight
+                        };
+                        log.debug('Dimension Update', 'New largest volume item: ' + packshipRecord.item + ' with volume ' + volume + ' cubic inches');
+                    }
+                    
+                } catch (itemError) {
+                    log.debug('Dimension Item Error', 'Failed to get dimensions for item ' + packshipRecord.item + ': ' + itemError.message);
+                }
+            }
+            
+            log.debug('Dimension Final', 'Final carton dimensions: ' + bestDimensions.length + 'x' + bestDimensions.width + 'x' + bestDimensions.height + ' inches (volume: ' + largestVolume + ')');
+            
+            return bestDimensions;
+        }
+
+        /**
          * Calculate total weight for a carton based on items and their weights
          *
          * @param {Array} cartonRecords Array of PackShip records for this carton
@@ -1157,15 +1344,20 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {Array} references The customer references to include
          * @returns {Object} FedEx package item object
          */
-        function buildCartonPackage(weight, cartonId, references) {
-            log.debug('Building Carton Package', 'Carton: ' + cartonId + ', Weight: ' + weight + ' lbs');
+        function buildCartonPackage(weight, cartonId, references, dimensions) {
+            log.debug('Building Carton Package', 'Carton: ' + cartonId + ', Weight: ' + weight + ' lbs, Dimensions: ' + dimensions.length + 'x' + dimensions.width + 'x' + dimensions.height);
 
             var packageItem = {
                 "weight": {
                     "units": "LB",
                     "value": weight
+                },
+                "dimensions": {
+                    "length": dimensions.length,
+                    "width": dimensions.width,
+                    "height": dimensions.height,
+                    "units": "IN"
                 }
-                // Note: Dimensions will be added later per user request
             };
 
             // Add customer references to the package (FedEx requires them at package level)
@@ -1268,14 +1460,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {string} salesOrderNumber The sales order number for filename
          * @returns {string} File URL if successful, original labelUrl if failed
          */
-        function downloadAndSaveLabel(labelUrl, bearerToken, salesOrderNumber) {
+        function downloadAndSaveLabel(labelUrl, bearerToken, salesOrderNumber, packageSequenceNumber) {
             try {
                 log.debug('DEBUG', 'downloadAndSaveLabel()::labelUrl = ' + labelUrl);
                 log.debug('DEBUG', 'downloadAndSaveLabel()::salesOrderNumber = ' + salesOrderNumber);
 
                 // Generate filename
                 var dateStr = getCurrentDateForFilename();
-                var fileName = dateStr + '_' + salesOrderNumber + '.zpl';
+                var fileName = dateStr + '_' + salesOrderNumber + '_' + packageSequenceNumber + '.zpl';
 
                 log.debug('DEBUG', 'downloadAndSaveLabel()::fileName = ' + fileName);
 
@@ -1298,6 +1490,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var fileObj = file.create({
                     name: fileName,
                     fileType: file.Type.PLAINTEXT, // ZPL is text-based
+                    isOnline: true,
                     contents: response.body,
                     folder: getFedExLabelFolderId() // Get or create the FedEx Label folder
                 });
@@ -1520,7 +1713,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                         var packageDoc = pieceResponse.packageDocuments[j];
                                         if (packageDoc.url && packageDoc.contentType === 'LABEL') {
                                             // Download and save the label, fallback to original URL if download fails
-                                            var savedLabelUrl = downloadAndSaveLabel(packageDoc.url, bearerToken, salesOrderNumber);
+                                            var savedLabelUrl = downloadAndSaveLabel(packageDoc.url, bearerToken, salesOrderNumber, i+1);
                                             labelUrls.push(savedLabelUrl);
                                         }
                                     }
