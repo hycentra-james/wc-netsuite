@@ -367,6 +367,118 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Validate and format phone number to ensure it's a valid 10-digit US phone number
+         *
+         * @param {string} phoneNumber The phone number to validate
+         * @returns {string} Valid 10-digit phone number or '9999999999' as fallback
+         */
+        function validatePhoneNumber(phoneNumber) {
+            try {
+                if (!phoneNumber) {
+                    log.debug('Phone Validation', 'Empty phone number, using fallback');
+                    return '9999999999';
+                }
+                
+                // Convert to string and remove all non-digit characters
+                var cleanedPhone = phoneNumber.toString().replace(/\D/g, '');
+                log.debug('Phone Validation', 'Original: "' + phoneNumber + '", Cleaned: "' + cleanedPhone + '"');
+                
+                // Check if we have exactly 10 digits
+                if (cleanedPhone.length === 10) {
+                    log.debug('Phone Validation', 'Valid 10-digit number: ' + cleanedPhone);
+                    return cleanedPhone;
+                }
+                
+                // Check if we have 11 digits starting with 1 (US country code)
+                if (cleanedPhone.length === 11 && cleanedPhone.charAt(0) === '1') {
+                    var phoneWithoutCountryCode = cleanedPhone.substring(1);
+                    log.debug('Phone Validation', 'Removed country code 1: ' + phoneWithoutCountryCode);
+                    return phoneWithoutCountryCode;
+                }
+                
+                // If we don't have valid format, use fallback
+                log.debug('Phone Validation', 'Invalid format (length: ' + cleanedPhone.length + '), using fallback');
+                return '9999999999';
+                
+            } catch (e) {
+                log.error('Phone Validation Error', 'Error validating phone: ' + e.message);
+                return '9999999999';
+            }
+        }
+
+        /**
+         * Update multiple package tracking numbers from FedEx response
+         *
+         * @param {string} fulfillmentId The Item Fulfillment record ID
+         * @param {Object} fedexResponse The complete FedEx API response
+         */
+        function updateMultiplePackageTrackingNumbers(fulfillmentId, fedexResponse) {
+            try {
+                log.debug('Multiple Tracking Update', 'Starting update for fulfillment: ' + fulfillmentId);
+                
+                // Extract tracking numbers from FedEx response
+                if (!fedexResponse || !fedexResponse.output || !fedexResponse.output.transactionShipments) {
+                    log.error('Multiple Tracking Error', 'Invalid FedEx response structure');
+                    return;
+                }
+                
+                var transactionShipment = fedexResponse.output.transactionShipments[0];
+                if (!transactionShipment || !transactionShipment.pieceResponses) {
+                    log.error('Multiple Tracking Error', 'No piece responses found in FedEx response');
+                    return;
+                }
+                
+                var pieceResponses = transactionShipment.pieceResponses;
+                var masterTrackingNumber = transactionShipment.masterTrackingNumber;
+                
+                log.debug('Multiple Tracking Info', 'Master tracking: ' + masterTrackingNumber + ', Pieces: ' + pieceResponses.length);
+                
+                // Load the Item Fulfillment record for updating
+                var recordForUpdate = record.load({
+                    type: record.Type.ITEM_FULFILLMENT,
+                    id: fulfillmentId
+                });
+                
+                var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
+                log.debug('Multiple Tracking Info', 'Package lines in NetSuite: ' + packageCount);
+                
+                if (packageCount === 0) {
+                    log.debug('Multiple Tracking Warning', 'No package lines found in Item Fulfillment');
+                    return;
+                }
+                
+                // Update tracking numbers for each package
+                for (var i = 0; i < Math.min(packageCount, pieceResponses.length); i++) {
+                    var trackingNumber;
+                    
+                    if (i === 0) {
+                        // First package uses master tracking number
+                        trackingNumber = masterTrackingNumber;
+                        log.debug('Multiple Tracking Update', 'Package ' + (i + 1) + ' (Master): ' + trackingNumber);
+                    } else {
+                        // Subsequent packages use individual tracking numbers
+                        trackingNumber = pieceResponses[i].trackingNumber;
+                        log.debug('Multiple Tracking Update', 'Package ' + (i + 1) + ' (Individual): ' + trackingNumber);
+                    }
+                    
+                    recordForUpdate.setSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagetrackingnumber',
+                        line: i,
+                        value: trackingNumber
+                    });
+                }
+                
+                // Save the record with all tracking number updates
+                recordForUpdate.save();
+                log.debug('Multiple Tracking Success', 'Updated ' + Math.min(packageCount, pieceResponses.length) + ' package tracking numbers');
+                
+            } catch (e) {
+                log.error('Multiple Tracking Error', 'Error updating package tracking numbers: ' + e.message + '\nStack: ' + e.stack);
+            }
+        }
+
+        /**
          * Get dynamic account number for API based on customer and PO prefix
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
@@ -629,7 +741,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             return {
                                 "contact": {
                                     "personName": shippingAddressSubrecord.getValue({ fieldId: 'attention' }) || 'Customer',
-                                    "phoneNumber": shippingAddressSubrecord.getValue({ fieldId: 'addrphone' }) || '9999999999'
+                                    "phoneNumber": validatePhoneNumber(shippingAddressSubrecord.getValue({ fieldId: 'addrphone' }))
                                 },
                                 "address": {
                                     "streetLines": streetLines,
@@ -670,7 +782,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             return {
                                 "contact": {
                                     "personName": shipTo.CompanyName || 'Customer',
-                                    "phoneNumber": shipTo.Phone || WC_PHONE_NUMBER
+                                    "phoneNumber": validatePhoneNumber(shipTo.Phone)
                                 },
                                 "address": {
                                     "streetLines": streetLines,
@@ -714,7 +826,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 return {
                                     "contact": {
                                         "personName": shipTo.CompanyName || 'Customer',
-                                        "phoneNumber": shipTo.Phone || WC_PHONE_NUMBER
+                                        "phoneNumber": validatePhoneNumber(shipTo.Phone)
                                     },
                                     "address": {
                                         "streetLines": streetLines.length > 0 ? streetLines : ["Address Not Available"],
@@ -785,7 +897,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var phoneNumber = '';
                 var lastLine = lines[lines.length - 1];
                 if (/^\d{10,}$/.test(lastLine.replace(/\D/g, ''))) {
-                    phoneNumber = lastLine.replace(/\D/g, '').substring(0, 10);
+                    phoneNumber = validatePhoneNumber(lastLine);
                     lines.pop(); // Remove phone from address lines
                 }
 
@@ -870,7 +982,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 return {
                     "contact": {
                         "personName": recipientName,
-                        "phoneNumber": phoneNumber
+                        "phoneNumber": validatePhoneNumber(phoneNumber)  // phoneNumber is already validated or empty
                     },
                     "address": {
                         "streetLines": streetLines,
@@ -1819,24 +1931,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                      values: updateValues
                 });
 
-                 // Update package tracking numbers - need to reload record for packages
-                 if (trackingNumber) {
-                     var recordForUpdate = record.load({
-                         type: record.Type.ITEM_FULFILLMENT,
-                         id: fulfillmentRecord.id
-                     });
-
-                     var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
-                     if (packageCount > 0) {
-                         recordForUpdate.setSublistValue({
-                             sublistId: 'package',
-                             fieldId: 'packagetrackingnumber',
-                             line: 0,
-                             value: trackingNumber
-                         });
-                         recordForUpdate.save();
-                     }
-                 }
+                // Update package tracking numbers with individual tracking numbers
+                updateMultiplePackageTrackingNumbers(fulfillmentRecord.id, response.result);
 
                  // Update Item Fulfillment status to "Shipped" after successful label creation and save
                  try {
