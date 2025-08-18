@@ -56,10 +56,10 @@ define(['N/log', 'N/record', 'N/search'], function(log, record, search) {
      * @returns {string} Complete 18-digit SSCC code
      */
     function buildSSCCCode(serialNumber) {
-        // Format: Application Identifier (2) + Extension Digit (1) + GS1 Company Prefix (5) + Serial Number (8) + Check Digit (1)
+        // Format: Application Identifier (2) + Extension Digit (1) + GS1 Company Prefix (5) + Serial Number (9) + Check Digit (1)
         
         // Pad serial number to 8 digits
-        var paddedSerial = String(serialNumber).padStart(8, '0');
+        var paddedSerial = String(serialNumber).padStart(9, '0');
         
         // Construct SSCC without check digit
         var ssccWithoutCheck = SSCC_CONFIG.APPLICATION_IDENTIFIER + 
