@@ -1221,7 +1221,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     ],
                     columns: [
                         'internalid',
-                        'custrecord_packship_carton',
+                        search.createColumn({
+                            name: 'custrecord_packship_carton',
+                            sort: search.Sort.ASC
+                        }),
                         'custrecord_packship_fulfillmentitem',
                         'custrecord_packship_totalpackedqty',
                         // Join to get the carton name from the PackShip - Pack Carton record
