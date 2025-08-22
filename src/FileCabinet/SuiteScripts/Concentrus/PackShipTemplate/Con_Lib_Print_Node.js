@@ -21,14 +21,15 @@ define(['N/https','N/log'],
         const PRINTER = {
             SHARP_MX_5070_2: '74452670',
             UPS_WORLDSHIP: '74452668',
-            UPS_SMALLPARCELWH2:'74452677'
+            UPS_SMALLPARCELWH2: '74637398',//'74452677' //74637398
+            UPS_ZP_450_2: '74452675'
         }
 
         function getPrinterByReportType(reportType) {
             if (reportType === REPORT_TYPE.PACKING_SLIP || reportType === REPORT_TYPE.BILL_OF_LADING ) {
                 return PRINTER.SHARP_MX_5070_2;
             } else if (reportType === REPORT_TYPE.UCC_LABEL) {
-                return PRINTER.UPS_WORLDSHIP;
+                return PRINTER.UPS_ZP_450_2;//return PRINTER.UPS_WORLDSHIP;
             } else if (reportType === REPORT_TYPE.FEDEX_LABEL) {
                 return PRINTER.UPS_SMALLPARCELWH2; // FedEx labels routed to small parcel printer
             } else {
