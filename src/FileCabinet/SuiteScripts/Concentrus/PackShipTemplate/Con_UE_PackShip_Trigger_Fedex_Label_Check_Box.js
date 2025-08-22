@@ -18,9 +18,8 @@
  * get the itemfulfillment id by field 'custrecord_packship_itemfulfillment'on customrecord_packship_cartonitem
  * assume all customrecord_packship_cartonitem under a shipment would under the same itemfulfillment record
  */
-define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHelper'],
-    (record, search, log, fedexHelper) => {
-
+define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
+    (record, search, log, fedexHelper, printNodeLib, itemFulfillmentPackageHelper) => {
         // Constants (field & record IDs)
         const REC_CARTON_ITEM = 'customrecord_packship_cartonitem';
         const REC_CARTON = 'customrecord_packship_carton';
@@ -46,6 +45,21 @@ define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHe
                 const itemFulfillmentId = newRec.getValue({ fieldId: FIELD_ITEM_FULFILLMENT });
                 if (!cartonId || !itemFulfillmentId) {
                     log.debug('Skip - missing cartonId or itemFulfillmentId', { cartonId, itemFulfillmentId });
+                    return;
+                }
+
+                // NEW CRITERIA: If parent carton already had another packed item (i.e., this is NOT the first carton item for that carton), skip.
+                // We only proceed when this carton item is the first one under its carton; subsequent items won't trigger completeness logic.
+                const existingCartonItemCount = search.create({
+                    type: REC_CARTON_ITEM,
+                    filters: [
+                        [ FIELD_PARENT_CARTON, 'anyof', cartonId ]
+                    ],
+                    columns: [ search.createColumn({ name: 'internalid', summary: 'COUNT' }) ]
+                }).run().getRange({ start:0, end:1 });
+                const cartonItemCount = existingCartonItemCount && existingCartonItemCount.length ? parseInt(existingCartonItemCount[0].getValue({ name: 'internalid', summary: 'COUNT' }), 10) : 0;
+                if (cartonItemCount > 1) {
+                    log.debug('Skip - parent carton already has another carton item (not first item for carton)', { cartonId, cartonItemCount });
                     return;
                 }
 
@@ -75,7 +89,7 @@ define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHe
 
                 // 2. Load IF & collect package sublist packagedescr values
                 const ifId = itemFulfillmentId;
-                const fulfillRec = record.load({ type: record.Type.ITEM_FULFILLMENT, id: ifId, isDynamic: false });
+                let fulfillRec = record.load({ type: record.Type.ITEM_FULFILLMENT, id: ifId, isDynamic: false });
                 const packageLineCount = fulfillRec.getLineCount({ sublistId: 'package' });
                 const packageDescrSet = new Set();
                 for (let i=0;i<packageLineCount;i++) {
@@ -102,35 +116,59 @@ define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHe
 
                 log.debug('All package descriptions have matching carton records -> last packed item reached', { shipmentId, cartonItemId: newRec.id });
 
-            const fedexRelatedMethod = [
-                    '3', // FedEx 2Day
-                    '15', // FedEx 2Day A.M.
-                    '16', // FedEx Express Saver
-                    '3783', // FedEx Express Saver® WC
-                    '17', // FedEx First Overnight
-                    '19', // FedEx Ground (SC)
-                    '20', // FedEx Home Delivery (SC)
-                    '22', // FedEx Priority Overnight
-                    '3785', // FedEx Priority Overnight® WC
-                    '23', // FedEx Standard Overnight
-                    '3784' // FedEx Standard Overnight® WC
-            ];
-            const shipMethodId = fulfillRec.getValue({ fieldId: 'shipmethod' });
-            if (fedexRelatedMethod.includes(shipMethodId)) { // FedEx Ground internal id
-                    log.debug("steven test2", "call fedex api");
-                    fedexHelper.createShipment(fulfillRec, false); // assume returns label URL or object
-                    record.submitFields({
+                let shipMethodId = fulfillRec.getValue({ fieldId: 'shipmethod' });
+
+                const fedexRelatedMethod = [
+                        '3', // FedEx 2Day
+                        '15', // FedEx 2Day A.M.
+                        '16', // FedEx Express Saver
+                        '3783', // FedEx Express Saver® WC
+                        '17', // FedEx First Overnight
+                        '19', // FedEx Ground (SC)
+                        '20', // FedEx Home Delivery (SC)
+                        '22', // FedEx Priority Overnight
+                        '3785', // FedEx Priority Overnight® WC
+                        '23', // FedEx Standard Overnight
+                        '3784' // FedEx Standard Overnight® WC
+                ];
+                if (fedexRelatedMethod.includes(shipMethodId)) { // FedEx Ground internal id
+                        const SMALL_PARCEL_SHIP_IDS = ['3', '15', '3786', '16', '3783', '17', '19', '20', '22', '3785', '23', '3784', '40', '3778', '3779', '41', '4', '43', '3780', '8988', '3776', '3777', '44', '3766'];
+                        if (SMALL_PARCEL_SHIP_IDS.indexOf(shipMethodId) !== -1) {
+                            itemFulfillmentPackageHelper.processCaseSmallParcel(fulfillRec.id);
+                        }
+                        fulfillRec = record.load({
                             type: record.Type.ITEM_FULFILLMENT,
                             id: ifId,
-                            values: {
-                                    'custbody_con_print_fedex_label': true
-                            }
-                    });
-                    //after this call, it would pull the label into file cabinet sync
-                    //use another block to print the label
-            } else {
-                    log.debug({ title: 'FedEx Auto Print Skip', details: 'Ship method not FedEx Ground on transition to Packed (id=' + shipMethodId + ')' });
-            }
+                            isDynamic: false
+                        });
+                        fedexHelper.createShipment(fulfillRec, false);
+
+                        const itemFulfillmentRec = record.load({
+                            type: record.Type.ITEM_FULFILLMENT,
+                            id: ifId,
+                            isDynamic: false
+                        });
+                        //after this call, it would pull the label into file cabinet sync
+                        //use another block to print the label
+                        const fedexLabelUrl = itemFulfillmentRec.getValue('custbody_shipping_label_url');
+                        const domain = url.resolveDomain({
+                            hostType: url.HostType.APPLICATION,
+                            accountId: runtime.accountId
+                        });
+                        log.debug('check is fedex label printing', `fedexLabelUrl ${fedexLabelUrl}`);
+                        if(fedexLabelUrl !== '') {
+                            log.debug('print fedex label', 'call print node lib');
+                            //get current runtime url
+                            const urls = fedexLabelUrl.split(',');
+                            if(urls.length === 1 && urls[0] === '') return;
+                            urls.forEach((url) => {
+                                if(url === '') return; // skip empty URLs
+                                printNodeLib.printByPrintNode('Print Fedex Label from NS', domain+url, 'FedEx Label', 1);
+                            });
+                        }
+                } else {
+                        log.debug({ title: 'FedEx Auto Print Skip', details: 'Ship method not FedEx Ground on transition to Packed (id=' + shipMethodId + ')' });
+                }
 
             } catch (e) {
                 log.error('afterSubmit failure', e);

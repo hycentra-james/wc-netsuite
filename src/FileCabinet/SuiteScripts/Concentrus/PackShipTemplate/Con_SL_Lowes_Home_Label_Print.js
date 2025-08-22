@@ -3,7 +3,7 @@
  * @NScriptType Suitelet
  * @NModuleScope SameAccount
  */
-define(['N/search', 'N/record', 'N/render', 'N/file', 'N/log', './SSCC_Helper','./Con_Lib_PackShip_Lib'], function (search, record, render, file, log, ssccHelper, packShipLib) {
+define(['N/search', 'N/record', 'N/render', 'N/file', 'N/log', '../../Hycentra/ItemFulfillment/SSCC_Helper','./Con_Lib_PackShip_Lib'], function (search, record, render, file, log, ssccHelper, packShipLib) {
 
     class Address {
         constructor(shippingAddressSubRecord) {

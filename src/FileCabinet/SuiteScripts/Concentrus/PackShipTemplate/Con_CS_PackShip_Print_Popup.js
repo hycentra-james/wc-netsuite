@@ -356,11 +356,12 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
             accountId: runtime.accountId
         });
         const urls = labelUrls.split(',');
-        if(urls.length < 1) {
+        if(urls.length === 1 && urls[0] === '') {
             alert('No FedEx label URL found for this Item Fulfillment.');
             return;
         }
         urls.forEach((url) => {
+            if(url === '') return; // skip empty URLs
             const fullUrl = domain + url;
             console.log('FedEx label URL:', fullUrl);
             printNodeLib.printByPrintNode('Print Fedex Label from NS', fullUrl, 'FedEx Label', 1);

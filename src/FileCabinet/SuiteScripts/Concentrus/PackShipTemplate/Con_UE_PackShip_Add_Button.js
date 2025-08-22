@@ -33,29 +33,28 @@ define(['N/record', 'N/runtime', 'N/url'], (record, runtime, url) => {
       const firstItemId = so.getSublistValue({ sublistId: 'item', fieldId: 'item', line: 0 }) || '';
       const addressType = so.getValue('custbody_hyc_address_type');
       const shippingMethod = fulfillment.getValue('shipmethod') || '';
-      if (!CUSTOMER_IDS.has(customerId)) return; // Not a target customer
 
       const proNumber = so.getValue(FIELD_PRO_NUMBER);
 
       // Attach client script (same folder)
       form.clientScriptModulePath = './Con_CS_PackShip_Print_Popup.js';
-
       if (!proNumber) {
         form.addButton({
           id: 'custpage_con_ps_enter_pro',
           label: 'Update SO Pro Number',
           functionName: 'conPsEnterPro' // implemented in client script
         });
-      } else {
+      }
+
+      if(CUSTOMER_IDS.has(customerId) && proNumber){
         // Add the four buttons
         form.addButton({ id: 'custpage_con_ps_print_all', label: 'Print All', functionName: 'conPsPrintAll' });
         form.addButton({ id: 'custpage_con_ps_print_bol', label: 'Print BOL', functionName: 'conPsPrintBOL(1)' });
         form.addButton({ id: 'custpage_con_ps_print_ucc', label: 'Print UCC', functionName: 'conPsPrintUCC' });
         // form.addButton({ id: 'custpage_con_ps_print_pack', label: 'Print Packing Slip', functionName: 'conPsPrintPackSlip' });
         form.addButton({ id: 'custpage_con_ps_print_pack', label: 'Print Packing Slip', functionName: 'printPackingSlipWithApi' });
-
-
       }
+
       // print fedex label by printer, for testing purpose only
       // copy from Con_UE_Update_SSCC_Number.js
       const fedexRelatedMethod = [
