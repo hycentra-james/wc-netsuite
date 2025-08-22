@@ -407,6 +407,253 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Get kit box definitions from a kit item record
+         *
+         * @param {string} kitItemId The internal ID of the kit item
+         * @returns {Array} Array of box definitions with carton SKUs
+         */
+        function getKitBoxDefinitions(kitItemId) {
+            try {
+                log.debug('Kit Analysis Start', 'Attempting to load item ' + kitItemId + ' as kit');
+                
+                // First try to load as kit item
+                try {
+                    var kitRecord = record.load({
+                        type: record.Type.KIT_ITEM,
+                        id: kitItemId
+                    });
+                    
+                    var numBoxes = parseInt(kitRecord.getValue('custitem_fmt_no_boxes')) || 0;
+                    log.debug('Kit Analysis', 'Kit ' + kitItemId + ' has ' + numBoxes + ' boxes');
+                    
+                    var boxDefinitions = [];
+                    for (var i = 1; i <= numBoxes && i <= 6; i++) {
+                        var cartonSkuField = 'custitem_wc_carton_sku_' + i;
+                        var cartonSkuId = kitRecord.getValue(cartonSkuField);
+                        
+                        if (cartonSkuId) {
+                            log.debug('Kit Box ' + i, 'Carton SKU ID: ' + cartonSkuId);
+                            boxDefinitions.push({
+                                boxNumber: i,
+                                cartonSkuId: cartonSkuId,
+                                expectedItems: getExpectedItemsForCartonSku(cartonSkuId)
+                            });
+                        }
+                    }
+                    
+                    return boxDefinitions;
+                } catch (loadError) {
+                    log.debug('Kit Analysis', 'Item ' + kitItemId + ' is not a kit item: ' + loadError.message);
+                    return []; // Not a kit item, return empty array
+                }
+                
+            } catch (e) {
+                log.error('Kit Analysis Error', 'Error analyzing item ' + kitItemId + ': ' + e.message);
+                return [];
+            }
+        }
+
+        /**
+         * Get expected items for a carton SKU (could be inventory item or kit)
+         *
+         * @param {string} cartonSkuId The internal ID of the carton SKU
+         * @returns {Array} Array of expected inventory item IDs
+         */
+        function getExpectedItemsForCartonSku(cartonSkuId) {
+            try {
+                // First try to load as inventory item
+                try {
+                    var itemRecord = record.load({
+                        type: record.Type.INVENTORY_ITEM,
+                        id: cartonSkuId
+                    });
+                    log.debug('Carton SKU Analysis', 'Carton SKU ' + cartonSkuId + ' is inventory item');
+                    return [cartonSkuId]; // Return the item itself
+                } catch (e) {
+                    // Not an inventory item, try as kit
+                    log.debug('Carton SKU Analysis', 'Carton SKU ' + cartonSkuId + ' is not inventory item, trying kit');
+                }
+                
+                // Try to load as kit item
+                var kitRecord = record.load({
+                    type: record.Type.KIT_ITEM,
+                    id: cartonSkuId
+                });
+                
+                log.debug('Carton SKU Analysis', 'Carton SKU ' + cartonSkuId + ' is kit item');
+                
+                // Get member items from the kit
+                var memberCount = kitRecord.getLineCount({ sublistId: 'member' });
+                var memberItems = [];
+                
+                for (var i = 0; i < memberCount; i++) {
+                    var memberId = kitRecord.getSublistValue({
+                        sublistId: 'member',
+                        fieldId: 'item',
+                        line: i
+                    });
+                    if (memberId) {
+                        memberItems.push(memberId);
+                        log.debug('Kit Member', 'Member ' + (i + 1) + ': ' + memberId);
+                    }
+                }
+                
+                return memberItems;
+            } catch (e) {
+                log.error('Carton SKU Analysis Error', 'Error analyzing carton SKU ' + cartonSkuId + ': ' + e.message);
+                return [];
+            }
+        }
+
+        /**
+         * Match cartons to fulfillment line items based on content
+         *
+         * @param {string} fulfillmentId The Item Fulfillment record ID
+         * @param {Array} packshipRecords PackShip records from searchPackShipRecords
+         * @param {Array} pieceResponses FedEx piece responses with tracking numbers
+         * @returns {Array} Array of carton-to-line mappings
+         */
+        function matchCartonsToLines(fulfillmentId, packshipRecords, pieceResponses) {
+            try {
+                log.debug('Carton Matching', 'Starting carton matching for fulfillment: ' + fulfillmentId);
+                
+                // Load Item Fulfillment to get line items
+                var fulfillmentRecord = record.load({
+                    type: record.Type.ITEM_FULFILLMENT,
+                    id: fulfillmentId
+                });
+                
+                var lineCount = fulfillmentRecord.getLineCount({ sublistId: 'item' });
+                var lineItems = [];
+                
+                // Get all line items from fulfillment
+                for (var i = 0; i < lineCount; i++) {
+                    var itemId = fulfillmentRecord.getSublistValue({
+                        sublistId: 'item',
+                        fieldId: 'item',
+                        line: i
+                    });
+                    var quantity = parseInt(fulfillmentRecord.getSublistValue({
+                        sublistId: 'item',
+                        fieldId: 'quantity',
+                        line: i
+                    })) || 1;
+                    
+                    lineItems.push({
+                        line: i,
+                        itemId: itemId,
+                        quantity: quantity
+                    });
+                    
+                    log.debug('Line Item', 'Line ' + i + ': Item ' + itemId + ', Qty ' + quantity);
+                }
+                
+                // Group packship records by carton
+                var cartonGroups = {};
+                for (var j = 0; j < packshipRecords.length; j++) {
+                    var packshipRecord = packshipRecords[j];
+                    if (!cartonGroups[packshipRecord.carton]) {
+                        cartonGroups[packshipRecord.carton] = [];
+                    }
+                    cartonGroups[packshipRecord.carton].push(packshipRecord.item);
+                }
+                
+                var cartonMappings = [];
+                var cartonNames = Object.keys(cartonGroups).sort(); // Sort for consistent processing
+                
+                log.debug('Carton Groups', 'Found ' + cartonNames.length + ' cartons: ' + JSON.stringify(cartonNames));
+                
+                // For each line item, try to match its boxes to cartons
+                for (var k = 0; k < lineItems.length; k++) {
+                    var lineItem = lineItems[k];
+                    log.debug('Line Item Analysis', 'Processing line ' + lineItem.line + ', item ' + lineItem.itemId + ', qty ' + lineItem.quantity);
+                    
+                    var boxDefinitions = getKitBoxDefinitions(lineItem.itemId);
+                    log.debug('Box Definitions Result', 'Line ' + lineItem.line + ' returned ' + boxDefinitions.length + ' box definitions');
+                    
+                    if (boxDefinitions.length === 0) {
+                        // Not a kit item, try direct matching
+                        log.debug('Direct Matching', 'Line ' + lineItem.line + ' is not a kit, trying direct match for item ' + lineItem.itemId);
+                        // For inventory items, match directly
+                        for (var m = 0; m < cartonNames.length; m++) {
+                            var cartonName = cartonNames[m];
+                            var cartonContents = cartonGroups[cartonName];
+                            log.debug('Direct Match Check', 'Checking carton ' + cartonName + ' contents: ' + JSON.stringify(cartonContents) + ' for item ' + lineItem.itemId);
+                            
+                            if (cartonContents.indexOf(lineItem.itemId) !== -1) {
+                                cartonMappings.push({
+                                    cartonName: cartonName,
+                                    lineNumber: lineItem.line,
+                                    boxNumber: 1,
+                                    matched: true
+                                });
+                                log.debug('Direct Match Success', 'Carton ' + cartonName + ' matches line ' + lineItem.line);
+                                break;
+                            }
+                        }
+                    } else {
+                        // Kit item - match each box for each quantity
+                        log.debug('Kit Matching', 'Line ' + lineItem.line + ' is kit with ' + boxDefinitions.length + ' boxes, quantity ' + lineItem.quantity);
+                        
+                        for (var qty = 0; qty < lineItem.quantity; qty++) {
+                            for (var boxIdx = 0; boxIdx < boxDefinitions.length; boxIdx++) {
+                                var boxDef = boxDefinitions[boxIdx];
+                                var expectedItems = boxDef.expectedItems;
+                                
+                                log.debug('Box Matching', 'Looking for box ' + boxDef.boxNumber + ' (qty ' + (qty + 1) + ') with items: ' + JSON.stringify(expectedItems));
+                                
+                                // Find a carton that contains all expected items
+                                for (var n = 0; n < cartonNames.length; n++) {
+                                    var cartonName = cartonNames[n];
+                                    var cartonContents = cartonGroups[cartonName];
+                                    
+                                    // Check if carton already mapped
+                                    var alreadyMapped = false;
+                                    for (var p = 0; p < cartonMappings.length; p++) {
+                                        if (cartonMappings[p].cartonName === cartonName) {
+                                            alreadyMapped = true;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (alreadyMapped) continue;
+                                    
+                                    // Check if this carton contains all expected items
+                                    var allItemsMatch = true;
+                                    for (var q = 0; q < expectedItems.length; q++) {
+                                        if (cartonContents.indexOf(expectedItems[q]) === -1) {
+                                            allItemsMatch = false;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    if (allItemsMatch) {
+                                        cartonMappings.push({
+                                            cartonName: cartonName,
+                                            lineNumber: lineItem.line,
+                                            boxNumber: boxDef.boxNumber,
+                                            quantityInstance: qty + 1,
+                                            matched: true
+                                        });
+                                        log.debug('Kit Match', 'Carton ' + cartonName + ' matches line ' + lineItem.line + ', box ' + boxDef.boxNumber + ', qty ' + (qty + 1));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                log.debug('Carton Matching Result', 'Found ' + cartonMappings.length + ' mappings: ' + JSON.stringify(cartonMappings));
+                return cartonMappings;
+                
+            } catch (e) {
+                log.error('Carton Matching Error', 'Error in carton matching: ' + e.message + '\nStack: ' + e.stack);
+                return [];
+            }
+        }
+
+        /**
          * Update multiple package tracking numbers from FedEx response
          *
          * @param {string} fulfillmentId The Item Fulfillment record ID
@@ -414,7 +661,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          */
         function updateMultiplePackageTrackingNumbers(fulfillmentId, fedexResponse) {
             try {
-                log.debug('Multiple Tracking Update', 'Starting update for fulfillment: ' + fulfillmentId);
+                log.debug('Multiple Tracking Update', 'Starting content-based tracking update for fulfillment: ' + fulfillmentId);
                 
                 // Extract tracking numbers from FedEx response
                 if (!fedexResponse || !fedexResponse.output || !fedexResponse.output.transactionShipments) {
@@ -433,6 +680,23 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 
                 log.debug('Multiple Tracking Info', 'Master tracking: ' + masterTrackingNumber + ', Pieces: ' + pieceResponses.length);
                 
+                // Get PackShip records for content matching
+                var packshipRecords = searchPackShipRecords(fulfillmentId);
+                if (packshipRecords.length === 0) {
+                    log.debug('Multiple Tracking Warning', 'No PackShip records found, falling back to sequential assignment');
+                    // Fall back to the old sequential method
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                    return;
+                }
+                
+                // Match cartons to line items based on content
+                var cartonMappings = matchCartonsToLines(fulfillmentId, packshipRecords, pieceResponses);
+                if (cartonMappings.length === 0) {
+                    log.debug('Multiple Tracking Warning', 'No carton mappings found, falling back to sequential assignment');
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                    return;
+                }
+                
                 // Load the Item Fulfillment record for updating
                 var recordForUpdate = record.load({
                     type: record.Type.ITEM_FULFILLMENT,
@@ -447,18 +711,119 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     return;
                 }
                 
-                // Update tracking numbers for each package
+                // Group carton mappings by carton name for tracking assignment
+                var cartonToTrackingMap = {};
+                var sortedCartonNames = [];
+                
+                // Get unique carton names in sorted order
+                for (var i = 0; i < cartonMappings.length; i++) {
+                    var cartonName = cartonMappings[i].cartonName;
+                    if (sortedCartonNames.indexOf(cartonName) === -1) {
+                        sortedCartonNames.push(cartonName);
+                    }
+                }
+                sortedCartonNames.sort();
+                
+                log.debug('Carton Order', 'Sorted cartons for tracking assignment: ' + JSON.stringify(sortedCartonNames));
+                
+                // Assign tracking numbers to cartons in sorted order
+                for (var j = 0; j < sortedCartonNames.length && j < pieceResponses.length; j++) {
+                    var cartonName = sortedCartonNames[j];
+                    var trackingNumber;
+                    
+                    if (j === 0) {
+                        // First carton gets master tracking number
+                        trackingNumber = masterTrackingNumber;
+                        log.debug('Carton Tracking', 'Carton ' + cartonName + ' (first) gets master tracking: ' + trackingNumber);
+                    } else {
+                        // Subsequent cartons get individual tracking numbers
+                        trackingNumber = pieceResponses[j].trackingNumber;
+                        log.debug('Carton Tracking', 'Carton ' + cartonName + ' gets tracking: ' + trackingNumber);
+                    }
+                    
+                    cartonToTrackingMap[cartonName] = trackingNumber;
+                }
+                
+                // Now find which package line corresponds to each carton and update tracking
+                // The challenge is that NetSuite package lines may not directly correspond to cartons
+                // We'll use the carton mappings to find the line that should get each tracking number
+                
+                var packageUpdates = [];
+                
+                // For each package line, try to determine which carton it represents
+                for (var k = 0; k < packageCount; k++) {
+                    // Try to find the carton mapping that corresponds to this package line
+                    // Since packages are created in the same order as buildPackageLineItems,
+                    // we can use the sorted carton order
+                    if (k < sortedCartonNames.length) {
+                        var correspondingCarton = sortedCartonNames[k];
+                        var assignedTracking = cartonToTrackingMap[correspondingCarton];
+                        
+                        if (assignedTracking) {
+                            packageUpdates.push({
+                                line: k,
+                                trackingNumber: assignedTracking,
+                                cartonName: correspondingCarton
+                            });
+                            
+                            log.debug('Package Mapping', 'Package line ' + k + ' -> Carton ' + correspondingCarton + ' -> Tracking ' + assignedTracking);
+                        }
+                    }
+                }
+                
+                // Apply the tracking number updates
+                for (var l = 0; l < packageUpdates.length; l++) {
+                    var update = packageUpdates[l];
+                    recordForUpdate.setSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagetrackingnumber',
+                        line: update.line,
+                        value: update.trackingNumber
+                    });
+                    
+                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' set to: ' + update.trackingNumber);
+                }
+                
+                // Save the record with all tracking number updates
+                recordForUpdate.save();
+                log.debug('Multiple Tracking Success', 'Updated ' + packageUpdates.length + ' package tracking numbers using content-based matching');
+                
+            } catch (e) {
+                log.error('Multiple Tracking Error', 'Error updating package tracking numbers: ' + e.message + '\nStack: ' + e.stack);
+                // Fall back to sequential assignment on error
+                try {
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                } catch (fallbackError) {
+                    log.error('Fallback Tracking Error', 'Fallback sequential assignment also failed: ' + fallbackError.message);
+                }
+            }
+        }
+
+        /**
+         * Fallback function for sequential tracking number assignment
+         *
+         * @param {string} fulfillmentId The Item Fulfillment record ID
+         * @param {Array} pieceResponses FedEx piece responses
+         * @param {string} masterTrackingNumber Master tracking number
+         */
+        function updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber) {
+            try {
+                log.debug('Sequential Tracking', 'Using sequential tracking assignment for fulfillment: ' + fulfillmentId);
+                
+                var recordForUpdate = record.load({
+                    type: record.Type.ITEM_FULFILLMENT,
+                    id: fulfillmentId
+                });
+                
+                var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
+                
                 for (var i = 0; i < Math.min(packageCount, pieceResponses.length); i++) {
                     var trackingNumber;
                     
                     if (i === 0) {
-                        // First package uses master tracking number
                         trackingNumber = masterTrackingNumber;
-                        log.debug('Multiple Tracking Update', 'Package ' + (i + 1) + ' (Master): ' + trackingNumber);
                     } else {
-                        // Subsequent packages use individual tracking numbers
                         trackingNumber = pieceResponses[i].trackingNumber;
-                        log.debug('Multiple Tracking Update', 'Package ' + (i + 1) + ' (Individual): ' + trackingNumber);
                     }
                     
                     recordForUpdate.setSublistValue({
@@ -467,14 +832,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         line: i,
                         value: trackingNumber
                     });
+                    
+                    log.debug('Sequential Tracking Update', 'Package ' + (i + 1) + ': ' + trackingNumber);
                 }
                 
-                // Save the record with all tracking number updates
                 recordForUpdate.save();
-                log.debug('Multiple Tracking Success', 'Updated ' + Math.min(packageCount, pieceResponses.length) + ' package tracking numbers');
+                log.debug('Sequential Tracking Success', 'Updated ' + Math.min(packageCount, pieceResponses.length) + ' tracking numbers sequentially');
                 
             } catch (e) {
-                log.error('Multiple Tracking Error', 'Error updating package tracking numbers: ' + e.message + '\nStack: ' + e.stack);
+                log.error('Sequential Tracking Error', 'Error in sequential tracking assignment: ' + e.message);
             }
         }
 
@@ -619,6 +985,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 //var apiAccountNumber = IS_TEST_MODE ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
                 log.debug('Billing Account Numbers', 'wcAccountNumber: ' + wcAccountNumber + ', Billing Account: ' + billingAccountNumber);
 
+                // Get ship method mapping once for both service type and packaging type
+                var shipMethodMapping = getShipMethodMapping(fulfillmentRecord);
+                log.debug('Ship Method Mapping', 'Using mapping: ' + JSON.stringify(shipMethodMapping));
+
                 // Build the payload - match FedEx example structure
                 var payload = {
                     "labelResponseOptions": "URL_ONLY",
@@ -626,8 +996,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         "shipper": buildShipperInfo(fulfillmentRecord, mappingRecord),
                         "recipients": [buildRecipientInfo(fulfillmentRecord)],
                         "shipDatestamp": getCurrentDateString(),
-                        "serviceType": getServiceType(fulfillmentRecord),
-                        "packagingType": getPackagingType(fulfillmentRecord),
+                        "serviceType": getServiceType(fulfillmentRecord, shipMethodMapping),
+                        "packagingType": getPackagingType(fulfillmentRecord, shipMethodMapping),
                         "pickupType": "USE_SCHEDULED_PICKUP",
                         "blockInsightVisibility": false,
                         "shippingChargesPayment": buildShippingChargesPayment(isBillToThirdParty, mappingRecord, billingAccountNumber),
@@ -1542,20 +1912,25 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
-         * Get FedEx service type based on shipping method
+         * Get ship method mapping (service type and packaging type) with caching
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
-         * @returns {string} FedEx service type
+         * @returns {Object} Object with serviceType and packagingType properties
          */
-        function getServiceType(fulfillmentRecord) {
+        function getShipMethodMapping(fulfillmentRecord) {
             var shipMethodId = fulfillmentRecord.getValue({ fieldId: 'shipmethod' }) || 0;
             var shipMethodText = fulfillmentRecord.getText({ fieldId: 'shipmethod' }) || '';
 
-            log.debug('DEBUG', 'getServiceType()::shipMethod = ' + shipMethodId);
-            log.debug('DEBUG', 'getServiceType()::shipMethodText = ' + shipMethodText);
+            log.debug('Ship Method Mapping', 'shipMethod ID = ' + shipMethodId + ', Text = ' + shipMethodText);
 
-            // Lookup ship code from custom record mapping
-            var shipCode = '';
+
+            // Default values
+            var mapping = {
+                serviceType: 'FEDEX_GROUND',
+                packagingType: 'YOUR_PACKAGING'
+            };
+
+            // Lookup ship code and packaging type from custom record mapping
             if (shipMethodId) {
                 try {
                     var shipMethodCodeSearch = search.create({
@@ -1564,38 +1939,63 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             ['custrecord_hyc_shipmethod_map_shipmethod', search.Operator.ANYOF, shipMethodId]
                         ],
                         columns: [
-                            'custrecord_hyc_shipmethod_map_code'
+                            'custrecord_hyc_shipmethod_map_code',
+                            'custrecord_hyc_shipmethod_pkg_type'
                         ]
                     });
 
                     var searchResults = shipMethodCodeSearch.run().getRange({ start: 0, end: 1 });
                     
                     if (searchResults && searchResults.length > 0) {
-                        shipCode = searchResults[0].getValue('custrecord_hyc_shipmethod_map_code') || '';
-                        log.debug('DEBUG', 'getServiceType()::Found ship code from mapping: ' + shipCode);
+                        var result = searchResults[0];
+                        var shipCode = result.getValue('custrecord_hyc_shipmethod_map_code') || '';
+                        var packagingType = result.getValue('custrecord_hyc_shipmethod_pkg_type') || '';
+                        
+                        if (shipCode) {
+                            mapping.serviceType = shipCode;
+                            log.debug('Ship Method Mapping', 'Found service type from mapping: ' + shipCode);
+                        }
+                        
+                        if (packagingType) {
+                            mapping.packagingType = packagingType;
+                            log.debug('Ship Method Mapping', 'Found packaging type from mapping: ' + packagingType);
+                        }
                     } else {
-                        log.debug('DEBUG', 'getServiceType()::No ship code mapping found for ship method ID: ' + shipMethodId);
+                        log.debug('Ship Method Mapping', 'No mapping found for ship method ID: ' + shipMethodId + ', using defaults');
                     }
                 } catch (e) {
-                    log.error('ERROR', 'Failed to lookup ship method code mapping: ' + e.message);
+                    log.error('Ship Method Mapping Error', 'Failed to lookup ship method mapping: ' + e.message + ', using defaults');
                 }
             }
 
-            // See Service List code from FedEX: https://developer.fedex.com/api/en-cr/guides/api-reference.html
 
-            // Default to FEDEX_GROUND if no service is found
-            return shipCode || 'FEDEX_GROUND';
+            return mapping;
+        }
+
+        /**
+         * Get FedEx service type based on shipping method
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} shipMethodMapping Optional pre-loaded ship method mapping
+         * @returns {string} FedEx service type
+         */
+        function getServiceType(fulfillmentRecord, shipMethodMapping) {
+            var mapping = shipMethodMapping || getShipMethodMapping(fulfillmentRecord);
+            log.debug('DEBUG', 'getServiceType()::Using service type: ' + mapping.serviceType);
+            return mapping.serviceType;
         }
 
         /**
          * Get FedEx packaging type
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} shipMethodMapping Optional pre-loaded ship method mapping
          * @returns {string} FedEx packaging type
          */
-        function getPackagingType(fulfillmentRecord) {
-            // You can make this dynamic based on your needs
-            return 'YOUR_PACKAGING';
+        function getPackagingType(fulfillmentRecord, shipMethodMapping) {
+            var mapping = shipMethodMapping || getShipMethodMapping(fulfillmentRecord);
+            log.debug('DEBUG', 'getPackagingType()::Using packaging type: ' + mapping.packagingType);
+            return mapping.packagingType;
         }
 
         /**
