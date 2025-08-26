@@ -46,7 +46,7 @@ define(['N/https','N/log'],
                 title: title,
                 contentType: reportType === REPORT_TYPE.FEDEX_LABEL ? 'raw_uri' : 'pdf_uri' ,
                 content: content,
-                qty: 1
+                qty: qty
             };
 
             const headers = {

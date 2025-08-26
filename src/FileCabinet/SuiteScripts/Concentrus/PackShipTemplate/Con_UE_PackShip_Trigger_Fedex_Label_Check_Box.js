@@ -8,18 +8,23 @@
  * then get all customrecord_packship_carton under this customrecord_packship_shipment
  * check if all customrecord_packship_carton has customrecord_packship_carton under it(search customrecord_packship_carton by field 'custrecord_packship_carton' on it)
  * this is the logic to check if all carton item has been created
- * (Updated) Trigger logic: execute actions ONLY when the LAST packed item (carton item) is created.
- * New completeness method:
- *   - Load related Item Fulfillment and iterate its 'package' sublist.
- *   - Collect all values of field 'packagedescr'.
- *   - Collect all carton record names under the same shipment.
- *   - If every carton name is present within the package description set (case-sensitive match), current carton item creation is the last one.
- * When last one: update Item Fulfillment checkbox 'custbody_con_packed_item_ready' = true and invoke FedEx shipment logic (if ship method qualifies).
+ * (Updated) Trigger logic (2025-08): execute actions ONLY when the LAST packed item (carton item) is created.
+ * New completeness method (replaces package/carton-name matching):
+ *   - Load related Item Fulfillment, iterate the 'item' sublist.
+ *   - For each line with itemtype = 'InvtPart', accumulate required quantity (field 'itemquantity') by item internal id.
+ *   - Aggregate packed quantities from all carton item records (customrecord_packship_cartonitem) linked to the same IF:
+ *       * Item field: 'custrecord_packship_fulfillmentitem'
+ *       * Quantity field: 'custrecord_packship_totalpackedqty'
+ *   - Treat kit components individually (already expanded on IF), so only compare inventory part items.
+ *   - When for every required item the summed packed qty >= required qty, the current carton item is deemed the LAST packed item.
+ * On completion:
+ *   - Set Item Fulfillment checkbox 'custbody_con_packed_item_ready' = true (idempotent).
+ *   - Invoke FedEx shipment creation & label print (when shipmethod is FedEx-related).
  * get the itemfulfillment id by field 'custrecord_packship_itemfulfillment'on customrecord_packship_cartonitem
  * assume all customrecord_packship_cartonitem under a shipment would under the same itemfulfillment record
  */
-define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
-    (record, search, log, fedexHelper, printNodeLib, itemFulfillmentPackageHelper) => {
+define(['N/record','N/search','N/log', 'N/url', 'N/runtime', '../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
+    (record, search, log, url, runtime, fedexHelper, printNodeLib, itemFulfillmentPackageHelper) => {
         // Constants (field & record IDs)
         const REC_CARTON_ITEM = 'customrecord_packship_cartonitem';
         const REC_CARTON = 'customrecord_packship_carton';
@@ -48,20 +53,6 @@ define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHe
                     return;
                 }
 
-                // NEW CRITERIA: If parent carton already had another packed item (i.e., this is NOT the first carton item for that carton), skip.
-                // We only proceed when this carton item is the first one under its carton; subsequent items won't trigger completeness logic.
-                const existingCartonItemCount = search.create({
-                    type: REC_CARTON_ITEM,
-                    filters: [
-                        [ FIELD_PARENT_CARTON, 'anyof', cartonId ]
-                    ],
-                    columns: [ search.createColumn({ name: 'internalid', summary: 'COUNT' }) ]
-                }).run().getRange({ start:0, end:1 });
-                const cartonItemCount = existingCartonItemCount && existingCartonItemCount.length ? parseInt(existingCartonItemCount[0].getValue({ name: 'internalid', summary: 'COUNT' }), 10) : 0;
-                if (cartonItemCount > 1) {
-                    log.debug('Skip - parent carton already has another carton item (not first item for carton)', { cartonId, cartonItemCount });
-                    return;
-                }
 
                 // Lookup shipment id from carton
                 const cartonShipmentLookup = search.lookupFields({
@@ -75,47 +66,82 @@ define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHe
                     return;
                 }
 
-                // 1. Gather all carton IDs & names under this shipment
-                const allCartons = [];
-                search.create({
-                    type: REC_CARTON,
-                    filters: [ [ FIELD_SHIPMENT, 'anyof', shipmentId ] ],
-                    columns: ['internalid','name']
-                }).run().each(r => { allCartons.push({ id: r.getValue('internalid'), name: r.getValue('name') }); return true; });
-                if (!allCartons.length) {
-                    log.debug('No cartons under shipment; nothing to do', { shipmentId });
-                    return;
-                }
-
-                // 2. Load IF & collect package sublist packagedescr values
+                // New completeness logic (item quantity based):
+                // 1. Load IF and build required quantity map for inventory part lines.
                 const ifId = itemFulfillmentId;
                 let fulfillRec = record.load({ type: record.Type.ITEM_FULFILLMENT, id: ifId, isDynamic: false });
-                const packageLineCount = fulfillRec.getLineCount({ sublistId: 'package' });
-                const packageDescrSet = new Set();
-                for (let i=0;i<packageLineCount;i++) {
-                    const descr = fulfillRec.getSublistValue({ sublistId: 'package', fieldId: 'packagedescr', line: i });
-                    if (descr) packageDescrSet.add(descr.trim());
+                const lineCount = fulfillRec.getLineCount({ sublistId: 'item' });
+                const requiredMap = {}; // itemId -> total required qty
+                for (let i=0; i<lineCount; i++) {
+                    const itemId = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'item', line: i });
+                    const qty = Number(fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'itemquantity', line: i })) || 0;
+                    const itemType = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'itemtype', line: i });
+                    // Only consider inventory part (InvtPart) lines per spec; assume components already present individually.
+                    if (itemType === 'InvtPart' && itemId && qty > 0) {
+                        requiredMap[itemId] = (requiredMap[itemId] || 0) + qty;
+                    }
                 }
-                log.debug('packageDescrSet', Array.from(packageDescrSet));
-
-                // 3. Determine completeness USING PACKAGE SUBLIST AS AUTHORITATIVE:
-                //    Every package description must have a corresponding carton name.
-                const cartonNameSet = new Set(allCartons.map(c => (c.name||'').trim()).filter(n=>n));
-                if (packageDescrSet.size === 0) {
-                    log.debug('No package lines yet, cannot be complete', { shipmentId });
+                if (Object.keys(requiredMap).length === 0) {
+                    log.debug('No qualifying inventory part lines on IF; skip completeness logic');
                     return;
                 }
-                //log for each source list
-                log.debug('cartonNameSet', Array.from(cartonNameSet));
-                log.debug('packageDescrSet', Array.from(packageDescrSet));
-                const missingPackages = Array.from(packageDescrSet).filter(pkgName => pkgName && !cartonNameSet.has(pkgName.trim()));
-                if (missingPackages.length) {
-                    log.debug('Not last carton item yet - some package descriptions lack matching carton records', { shipmentId, missingPackages });
-                    return; // not complete yet
+
+                // 2. Aggregate packed quantities from carton item (packed item) records for this IF.
+                //    Fields: custrecord_packship_fulfillmentitem (item), custrecord_packship_totalpackedqty (qty)
+                //    (Updated) Removed summary search due to field limitations; retrieve raw rows and aggregate in JS.
+                const FIELD_PACKED_ITEM = 'custrecord_packship_fulfillmentitem';
+                const FIELD_PACKED_QTY = 'custrecord_packship_totalpackedqty';
+                const packedMap = {}; // itemId -> total packed qty
+                const packedSearch = search.create({
+                    type: REC_CARTON_ITEM,
+                    filters: [ [ FIELD_ITEM_FULFILLMENT, 'anyof', ifId ], 'AND', [ FIELD_PACKED_ITEM, 'noneof', '@NONE@' ] ],
+                    columns: [
+                        search.createColumn({ name: FIELD_PACKED_QTY, label: 'Total Packed Quantity' }),
+                        search.createColumn({ name: FIELD_PACKED_ITEM, label: 'Item' })
+                    ]
+                });
+                packedSearch.run().each(res => {
+                    const itemIdRaw = res.getValue({ name: FIELD_PACKED_ITEM });
+                    const qtyRaw = res.getValue({ name: FIELD_PACKED_QTY });
+                    const itemId = itemIdRaw || '';
+                    const qty = Number(qtyRaw) || 0;
+                    if (itemId) {
+                        packedMap[itemId] = (packedMap[itemId] || 0) + qty;
+                    }
+                    return true;
+                });
+
+                // 3. Compare required vs packed; determine completeness.
+                const incompleteItems = [];
+                Object.keys(requiredMap).forEach(itemId => {
+                    const required = requiredMap[itemId] || 0;
+                    const packed = packedMap[itemId] || 0;
+                    if (packed < required) {
+                        incompleteItems.push({ itemId, required, packed });
+                    }
+                });
+                if (incompleteItems.length) {
+                    log.debug('Not complete yet - some items not fully packed', { incompleteItems });
+                    return; // wait for more carton items
                 }
 
-                log.debug('All package descriptions have matching carton records -> last packed item reached', { shipmentId, cartonItemId: newRec.id });
+                log.debug('All required inventory part quantities fully packed -> last packed item reached', { ifId });
 
+                // 4. Mark IF packed item ready (idempotent)
+                const PACKED_READY_FIELD = 'custbody_con_packed_item_ready';
+                const alreadyReady = fulfillRec.getValue({ fieldId: PACKED_READY_FIELD });
+                if (!alreadyReady) {
+                    record.submitFields({
+                        type: record.Type.ITEM_FULFILLMENT,
+                        id: ifId,
+                        values: { [PACKED_READY_FIELD]: true }
+                    });
+                    log.debug('Item Fulfillment marked packed item ready', { ifId });
+                } else {
+                    log.debug('Item Fulfillment already marked packed item ready', { ifId });
+                }
+
+                // 5. FedEx logic & printing (unchanged aside from placement)
                 let shipMethodId = fulfillRec.getValue({ fieldId: 'shipmethod' });
 
                 const fedexRelatedMethod = [
@@ -129,13 +155,11 @@ define(['N/record','N/search','N/log','../../Hycentra/Integrations/FedEX/fedexHe
                         '22', // FedEx Priority Overnight
                         '3785', // FedEx Priority Overnight® WC
                         '23', // FedEx Standard Overnight
-                        '3784' // FedEx Standard Overnight® WC
+                        '3784', // FedEx Standard Overnight® WC
+                        '14075' //FedEx One Rate - PAK
                 ];
                 if (fedexRelatedMethod.includes(shipMethodId)) { // FedEx Ground internal id
-                        const SMALL_PARCEL_SHIP_IDS = ['3', '15', '3786', '16', '3783', '17', '19', '20', '22', '3785', '23', '3784', '40', '3778', '3779', '41', '4', '43', '3780', '8988', '3776', '3777', '44', '3766'];
-                        if (SMALL_PARCEL_SHIP_IDS.indexOf(shipMethodId) !== -1) {
-                            itemFulfillmentPackageHelper.processCaseSmallParcel(fulfillRec.id);
-                        }
+                        itemFulfillmentPackageHelper.processFullSmallParcel(fulfillRec.id, shipMethodId);
                         fulfillRec = record.load({
                             type: record.Type.ITEM_FULFILLMENT,
                             id: ifId,
