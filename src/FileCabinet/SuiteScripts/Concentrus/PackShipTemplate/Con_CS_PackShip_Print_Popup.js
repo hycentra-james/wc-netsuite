@@ -246,7 +246,8 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
     //  - Packing Slip: totalPalletQty (min 1)
     const bolCount = Math.max(2, (Number(totalPalletQty) || 0) + 2);
     const uccBase = (customerCfg.isLowes(customerId)) ? Number(totalBoxes) : Number(totalPalletQty);
-    const uccCount = Math.max(1, uccBase || 0);
+    const uccCount = 1;//update 0820: assume the label handle the boxes/pallets part by pdf repeat so no handle it twice
+        // Math.max(1, uccBase || 0);
     const packingSlipCount = Math.max(1, Number(totalPalletQty) || 0);
 
         if (bol) {

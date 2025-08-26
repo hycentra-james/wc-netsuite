@@ -143,8 +143,8 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
     log.debug('id',shipMethodId);
     log.debug('result', obj);
     return{
-      shippingMethod: obj.displayname || '',
-      scac: obj.itemid || ''
+      shippingMethod: obj.itemid || '',
+      scac: obj.displayname || ''
     }
   }
 
@@ -218,7 +218,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
         </tr>
         <tr>
           <td colspan="7">
-            <span class="inTableTitle">Date:</span><span> ${escapeXml(dateOfExportation)}</span>
+            <span class="inTableTitle">Date: </span><span> ${escapeXml(dateOfExportation)}</span>
           </td>
         </tr>
         <tr>
@@ -227,11 +227,11 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
               <tbody>
                 <tr>
                   <td style="position:relative; border-top:none;">
-                    <span class="inTableTitle leftUpper">Ship From:</span><br/>
+                    <span class="inTableTitle leftUpper">Ship From: </span><br/>
                     <span class="placeholder">Water Creation<br/>701 Auto Center Drive<br/>Ontario, CA 91761<br/>909-773-1777</span><br/>
                     <p>
                       <span style="padding-right:50px">
-                        <span class="inTableSubtitle">SID#:</span><span class="placeholder"></span>
+                        <span class="inTableSubtitle">SID#: </span><span class="placeholder"></span>
                       </span>
                       <input display="inline" type="checkbox" name="FOB1"/>
                       <span class="inTableSubtitle checkboxText">FOB</span>
@@ -240,7 +240,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
                 </tr>
                 <tr>
                   <td style="position:relative;">
-                    <span class="inTableTitle leftUpper">Ship To:</span><br/>
+                    <span class="inTableTitle leftUpper">Ship To: </span><br/>
                     <table width="100%" >
                         <tbody>
                           <tr>
@@ -251,7 +251,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
                     </table>
                     <p>
                       <span style="padding-right:50px">
-                        <span class="inTableSubtitle">CID#:</span><span class="placeholder"></span>
+                        <span class="inTableSubtitle">CID#: </span><span class="placeholder"></span>
                       </span>
                       <input display="inline" type="checkbox" name="FOB2"/>
                       <span class="inTableSubtitle checkboxText">FOB</span>
@@ -260,7 +260,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
                 </tr>
                 <tr>
                   <td style="position:relative; border-bottom:none;">
-                    <span class="inTableTitle leftUpper">Third Party Freight Charges - Bill To:</span><br/>
+                    <span class="inTableTitle leftUpper">Third Party Freight Charges - Bill To: </span><br/>
                     <p class="placeholder">${escapeXml(getThirdPartyFreightChargesBillTo(customerId))}</p>
                   </td>
                 </tr>
@@ -272,7 +272,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
               <tbody>
                 <tr>
                   <td style="border-top:none;">
-                    <span class="inTableTitle">Bill of Lading No:</span><br/>
+                    <span class="inTableTitle">Bill of Lading No: </span><br/>
                     <!--${shipmentInfo.bolNo ? `${escapeXml(shipmentInfo.bolNo)}<br/><qrcode codetype="code128" value="${escapeXml(shipmentInfo.bolNo)}"/>` : ''}
                     ${shipmentInfo.bolNo ? `<barcode codetype="qrcode" showtext="false" height="40" width="40" value="${escapeXml(shipmentInfo.bolNo)}"/>` : ''}-->
                     <p align="center" valign="middle" style="font-size:18px; font-weight:bold; color:#B7B7B7">BARCODE SPACE</p>
@@ -280,27 +280,27 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
                 </tr>
                 <tr>
                   <td>
-                    <span class="inTableTitle">Carrier Name:</span><span class="fillingTextStyle2">${escapeXml(shipmentInfo.bolCarrierName)}</span><br/>
+                    <span class="inTableTitle">Carrier Name: </span><span class="fillingTextStyle2">${escapeXml(shipmentInfo.bolCarrierName)}</span><br/>
                   </td>
                 </tr>
                 <tr>
                   <td>
-                    <span class="inTableTitle">Trailer No:</span><span class="fillingTextStyle2">${escapeXml(shipmentInfo.bolTrailerNo)}</span><br/>
+                    <span class="inTableTitle">Trailer No: </span><span class="fillingTextStyle2">${escapeXml(shipmentInfo.bolTrailerNo)}</span><br/>
                   </td>
                 </tr>
                 <tr>
                   <td>
-                    <span class="inTableTitle">Seal Number(s):</span><span class="fillingTextStyle2">${escapeXml(shipmentInfo.bolSealNumber)}</span>
+                    <span class="inTableTitle">Seal Number(s): </span><span class="fillingTextStyle2">${escapeXml(shipmentInfo.bolSealNumber)}</span>
                   </td>
                 </tr>
                 <tr>
                   <td>
-                    <span class="inTableTitle">SCAC:</span><span>${escapeXml(scac)}</span><br/>
+                    <span class="inTableTitle">SCAC: </span><span>${escapeXml(scac)}</span><br/>
                   </td>
                 </tr>
                 <tr>
                   <td>
-                    <span class="inTableTitle">Pro No:</span>${escapeXml(proNumber)}<br/>
+                    <span class="inTableTitle">Pro No: </span>${escapeXml(proNumber)}<br/>
                     <barcode codetype="code128" value="${escapeXml(proNumber)}"/><br/><br/>
                   </td>
                 </tr>
@@ -324,7 +324,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
         </tr>
         <tr>
           <td colspan="14" style="height:5vh; position:relative;">
-            <span class="inTableTitle leftUpper" style="font-size:10px;">Special Instructions:</span><br/>
+            <span class="inTableTitle leftUpper" style="font-size:10px;">Special Instructions: </span><br/>
             <span class="fillingTextStyle2">${escapeXml(getSpecialInstruction(customerId, addressType, shippingMethodInValue))}</span>
           </td>
         </tr>
@@ -383,7 +383,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
         </tr>
         <tr>
           <td colspan="7" align="left">
-            <span>Where the rate is dependent on value, shippers are required to state specifically in writingthe agreed or declared value of the property as follows:<br/>"The agreed or declared value of the property is specifically stated by the shipper to be notexceeding</span><br/>
+            <span>Where the rate is dependent on value, shippers are required to state specifically in writingthe agreed or declared value of the property as follows: <br/>"The agreed or declared value of the property is specifically stated by the shipper to be notexceeding</span><br/>
             <span class="underlineText">_________________________</span><span>FOB</span><span class="underlineText">______________________</span><span>."</span>
           </td>
           <td colspan="7">
@@ -399,7 +399,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
         </tr>
         <tr>
           <td colspan="14">
-            <span class="inTableTitle">NOTE:</span>
+            <span class="inTableTitle">NOTE: </span>
             <span> Liability Limitation for loss or damage in this shipment may be applicable. See 49 U.S.C. - 14706(c)(1)(A) and (B).</span>
           </td>
         </tr>

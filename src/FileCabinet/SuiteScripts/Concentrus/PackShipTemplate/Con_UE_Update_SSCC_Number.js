@@ -6,8 +6,8 @@
  * 2. Automatically Trigger FedEx labels generating when transitioning to Packed (B) status
  * 3. Get field custbody_shipping_label_url from this record and print it if the need to print is checked
  */
-define(['N/record','N/log','N/runtime','N/search','N/url','./SSCC_Helper','../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Customer_Config'],
-    (record, log, runtime, search, url, ssccHelper, fedexHelper, printNodeLib, customerCfg) => {
+define(['N/record','N/log','N/runtime','N/search','N/url','../../Hycentra/ItemFulfillment/SSCC_Helper','../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Customer_Config'],
+    (record, log, runtime, search, url, ssccHelper, fedexHelper, customerCfg) => {
 
         const SSCC_FIELD_ID = 'custcol_fmt_sscc_lpn_number';
         const ALLOWED_SHIP_STATUSES = new Set(['B','C']); // B=Packed, C=Shipped
@@ -106,37 +106,7 @@ define(['N/record','N/log','N/runtime','N/search','N/url','./SSCC_Helper','../..
                     fulfillRec.save({ enableSourcing: false, ignoreMandatoryFields: true });
                 }
 
-                const itemFulfillmentRec = record.load({
-                    type: record.Type.ITEM_FULFILLMENT,
-                    id: ifId,
-                    isDynamic: false
-                });
-                const isPrintFedexLabel = itemFulfillmentRec.getValue('custbody_con_print_fedex_label');
-                const fedexLabelUrl = itemFulfillmentRec.getValue('custbody_shipping_label_url');
-                const errorField = itemFulfillmentRec.getValue('custbody_shipping_error_message');
-                const domain = url.resolveDomain({
-                    hostType: url.HostType.APPLICATION,
-                    accountId: runtime.accountId
-                });
-                log.debug('check is fedex label printing', `isPrintFedexLabel ${isPrintFedexLabel} | fedexLabelUrl ${fedexLabelUrl}`);
-                if(isPrintFedexLabel && fedexLabelUrl !== '') {
-                    log.debug('print fedex label', 'call print node lib');
-                    //get current runtime url
-                    const urls = fedexLabelUrl.split(',');
-                    if(urls.length === 1 && urls[0] === '') return;
-                    urls.forEach((url) => {
-                        if(url === '') return; // skip empty URLs
-                        printNodeLib.printByPrintNode('Print Fedex Label from NS', domain+url, 'FedEx Label', 1);
-                    });
-                    const ifId = ctx.newRecord.id;
-                    record.submitFields({
-                        type: record.Type.ITEM_FULFILLMENT,
-                        id: ifId,
-                        values: {
-                            'custbody_con_print_fedex_label': false, // reset flag after printing
-                        }
-                    });
-                }
+
             } catch (error) {
                 log.error({ title: '' + error.name, details: `Error Message: ${error.message} | Error Stack: ${error.stack}` });
             }
