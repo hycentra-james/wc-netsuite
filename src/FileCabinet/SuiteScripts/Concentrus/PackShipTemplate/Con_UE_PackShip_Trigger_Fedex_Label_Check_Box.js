@@ -40,6 +40,10 @@ define(['N/record','N/search','N/log', 'N/url', 'N/runtime', '../../Hycentra/Int
      * Completion definition: every carton (name) for the shipment is represented in the Item Fulfillment 'package' sublist (field packagedescr).
      */
         const afterSubmit = (ctx) => {
+            // Start execution timer for performance profiling
+            var startTime = Date.now();
+            log.debug('PERFORMANCE', 'afterSubmit()::Execution started at ' + new Date(startTime).toISOString());
+            
             try {
                 log.debug('Triggered', `at ${new Date()} | id ${ctx.newRecord.id}`)
                 if (ctx.type !== ctx.UserEventType.CREATE) return; // only on create
@@ -194,7 +198,17 @@ define(['N/record','N/search','N/log', 'N/url', 'N/runtime', '../../Hycentra/Int
                         log.debug({ title: 'FedEx Auto Print Skip', details: 'Ship method not FedEx Ground on transition to Packed (id=' + shipMethodId + ')' });
                 }
 
+                // Calculate and log execution time - SUCCESS case
+                var endTime = Date.now();
+                var executionTime = endTime - startTime;
+                log.debug('PERFORMANCE', 'afterSubmit()::Execution completed successfully in ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+
             } catch (e) {
+                // Calculate and log execution time - ERROR case
+                var endTime = Date.now();
+                var executionTime = endTime - startTime;
+                log.error('PERFORMANCE', 'afterSubmit()::Execution failed after ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+                
                 log.error('afterSubmit failure', e);
             }
         };
