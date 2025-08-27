@@ -2044,20 +2044,66 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 log.debug('DEBUG', 'downloadAndSaveLabel()::fileName = ' + fileName);
 
-                // Download the label using bearer token
-                var response = https.get({
-                    url: labelUrl,
-                    headers: {
-                        'Authorization': 'Bearer ' + bearerToken
-                    }
-                });
+                // Retry logic for label download with exponential backoff
+                var maxRetries = 3;
+                var baseDelay = 1000; // 1 second base delay
+                var response = null;
+                var lastError = null;
 
-                if (response.code !== 200) {
-                    log.error('ERROR', 'Failed to download label, HTTP status: ' + response.code);
-                    return labelUrl; // Return original URL on failure
+                for (var attempt = 1; attempt <= maxRetries; attempt++) {
+                    try {
+                        log.debug('DEBUG', 'downloadAndSaveLabel()::Attempt ' + attempt + ' of ' + maxRetries);
+                        
+                        // Download the label using bearer token
+                        response = https.get({
+                            url: labelUrl,
+                            headers: {
+                                'Authorization': 'Bearer ' + bearerToken
+                            }
+                        });
+
+                        // Check if successful
+                        if (response.code === 200) {
+                            log.debug('DEBUG', 'Label downloaded successfully on attempt ' + attempt + ', response size: ' + (response.body ? response.body.length : 'unknown'));
+                            break;
+                        } else {
+                            lastError = 'HTTP status: ' + response.code;
+                            log.audit('RETRY', 'Download attempt ' + attempt + ' failed with HTTP status: ' + response.code);
+                            
+                            // If this is not the last attempt, wait before retrying
+                            if (attempt < maxRetries) {
+                                var delay = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s
+                                log.audit('RETRY', 'Waiting ' + delay + 'ms before retry...');
+                                
+                                // Simple delay implementation (NetSuite doesn't have native sleep)
+                                var startTime = Date.now();
+                                while (Date.now() - startTime < delay) {
+                                    // Busy wait - not ideal but necessary in NetSuite
+                                }
+                            }
+                        }
+                    } catch (downloadError) {
+                        lastError = downloadError.message;
+                        log.error('RETRY', 'Download attempt ' + attempt + ' failed with error: ' + downloadError.message);
+                        
+                        // If this is not the last attempt, wait before retrying
+                        if (attempt < maxRetries) {
+                            var delay = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff
+                            log.audit('RETRY', 'Waiting ' + delay + 'ms before retry...');
+                            
+                            var startTime = Date.now();
+                            while (Date.now() - startTime < delay) {
+                                // Busy wait
+                            }
+                        }
+                    }
                 }
 
-                log.debug('DEBUG', 'Label downloaded successfully, response size: ' + (response.body ? response.body.length : 'unknown'));
+                // Check final result
+                if (!response || response.code !== 200) {
+                    log.error('ERROR', 'Failed to download label after ' + maxRetries + ' attempts. Last error: ' + lastError);
+                    return labelUrl; // Return original URL on failure
+                }
 
                 // Create file object
                 var fileObj = file.create({
@@ -2137,6 +2183,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {Object} Shipment creation result
          */
         function createShipment(fulfillmentRecord, testMode) {
+            // Start execution timer for performance profiling
+            var startTime = Date.now();
+            log.debug('PERFORMANCE', 'createShipment()::Execution started at ' + new Date(startTime).toISOString());
+            
             try {
                 // Set the module-level test mode flag
                 IS_TEST_MODE = testMode || false;
@@ -2362,16 +2412,27 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     packagetrackingnumber: trackingNumber
                 }));
 
+                // Calculate and log execution time - SUCCESS case
+                var endTime = Date.now();
+                var executionTime = endTime - startTime;
+                log.debug('PERFORMANCE', 'createShipment()::Execution completed successfully in ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+
                 return {
                     success: true,
                     message: 'FedEx shipment created successfully!' + (testMode ? ' (Test Mode)' : ''),
                     trackingNumber: trackingNumber,
                     labelUrl: labelUrlString,
                     transactionId: transactionId,
-                    alerts: alertsJson
+                    alerts: alertsJson,
+                    executionTime: executionTime
                 };
 
             } catch (e) {
+                // Calculate and log execution time - ERROR case
+                var endTime = Date.now();
+                var executionTime = endTime - startTime;
+                log.error('PERFORMANCE', 'createShipment()::Execution failed after ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+                
                 log.error({
                     title: 'FedEx Shipment Error',
                     details: e.message + '\nStack: ' + e.stack
@@ -2379,7 +2440,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 return {
                     success: false,
-                    message: e.message
+                    message: e.message,
+                    executionTime: executionTime
                 };
             }
         }

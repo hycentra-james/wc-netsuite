@@ -60,14 +60,59 @@ define(['N/record','N/log','N/runtime','N/search','N/url','../../Hycentra/ItemFu
 
                 const customerId = fulfillRec.getValue({ fieldId: 'entity' }) || '';
 
+                // Get Sales Order items for comparison
+                const salesOrderId = fulfillRec.getValue({ fieldId: 'createdfrom' });
+                let salesOrderItems = new Set();
+                
+                if (salesOrderId) {
+                    try {
+                        const salesOrderRec = record.load({ type: record.Type.SALES_ORDER, id: salesOrderId, isDynamic: false });
+                        const soLineCount = salesOrderRec.getLineCount({ sublistId: 'item' });
+                        
+                        log.debug({ 
+                            title: 'SSCC Debug - Sales Order Info', 
+                            details: `Sales Order ID: ${salesOrderId}, SO Line Count: ${soLineCount}` 
+                        });
+                        
+                        for (let j = 0; j < soLineCount; j++) {
+                            const soItemId = salesOrderRec.getSublistValue({ sublistId: 'item', fieldId: 'item', line: j });
+                            if (soItemId) {
+                                salesOrderItems.add(soItemId.toString());
+                            }
+                        }
+                        
+                        log.debug({ 
+                            title: 'SSCC Debug - Sales Order Items', 
+                            details: `SO Items: ${Array.from(salesOrderItems).join(', ')}` 
+                        });
+                        
+                    } catch (e) {
+                        log.error({ title: 'Sales Order Lookup Failed', details: `SO ID ${salesOrderId}: ${e.message}` });
+                    }
+                }
+
                 for (let i = 0; i < lineCount; i++) {
                     const existing = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: SSCC_FIELD_ID, line: i }) || '';
-                    if (existing) continue; // already populated (legacy counts not adjusted here)
                     const qty = Number(fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'quantity', line: i })) || 0;
-                    if (qty <= 0) continue;
                     const itemId = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'item', line: i });
                     if (!itemId) continue;
                     const { palletsPerUnit, boxesPerUnit } = getItemShipUnits(itemId);
+
+                    const itemText = fulfillRec.getSublistText({ sublistId: 'item', fieldId: 'item', line: i }) || '';
+                    
+                    // Check if this item exists in the original Sales Order
+                    const existsInSO = salesOrderItems.has(itemId.toString());
+                    
+                    log.debug({ 
+                        title: `SSCC Debug - Line ${i}`, 
+                        details: `Item: ${itemText} (ID: ${itemId}), Qty: ${qty}, Existing SSCC: ${existing ? 'YES' : 'NO'}, Exists in SO: ${existsInSO ? 'YES' : 'NO'}` 
+                    });
+                    
+                    // Skip items that don't exist in the original Sales Order (WMS-added member items)
+                    if (!existsInSO) {
+                        log.debug({ title: `SSCC Debug - Line ${i} Skipped`, details: 'Item not found in original Sales Order (WMS-added member item)' });
+                        continue;
+                    }
 
                     // Determine shipping units using centralized preference
                     let shipUnits = 0;
@@ -81,16 +126,30 @@ define(['N/record','N/log','N/runtime','N/search','N/url','../../Hycentra/ItemFu
                         else if (boxesPerUnit > 0) shipUnits = boxesPerUnit * qty;
                         else shipUnits = qty;
                     }
+                    
+                    log.debug({ 
+                        title: `SSCC Debug - Line ${i} Shipping Units`, 
+                        details: `Item: ${itemText}, Calculated ShipUnits: ${shipUnits}` 
+                    });
+                    
                     if (shipUnits <= 0) continue;
 
                     const codes = [];
                     for (let n = 0; n < shipUnits; n++) {
+                        log.debug({ 
+                            title: `SSCC Debug - Line ${i} Generation`, 
+                            details: `Generating SSCC #${n+1} of ${shipUnits} for item ${itemText}` 
+                        });
                         const code = ssccHelper.generateSSCC();
                         if (!code) {
                             log.error({ title: 'SSCC Generation Failed', details: `Stopped at line ${i} unit index code #${n+1}` });
                             break;
                         }
                         codes.push(code);
+                        log.debug({ 
+                            title: `SSCC Debug - Line ${i} Generated`, 
+                            details: `Generated SSCC: ${code}` 
+                        });
                     }
                     if (codes.length === shipUnits) {
                         fulfillRec.setSublistValue({ sublistId: 'item', fieldId: SSCC_FIELD_ID, line: i, value: codes.join(',') });
