@@ -141,10 +141,6 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {record} Updated token record
          */
         function refreshToken(tokenRecord) {
-            // Start execution timer for performance profiling
-            var startTime = Date.now();
-            log.debug('PERFORMANCE', 'refreshToken()::Execution started at ' + new Date(startTime).toISOString());
-            
             // Get the properly formatted endpoint URL (with trailing slash)
             var baseUrl = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_endpoint' }) || "https://apis.fedex.com/";
 
@@ -187,18 +183,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     updateAccessToken(accessToken, expiresIn);
                     log.debug('DEBUG', 'refreshToken()::updateAccessToken success');
 
-                    // Calculate and log execution time - SUCCESS case
-                    var endTime = Date.now();
-                    var executionTime = endTime - startTime;
-                    log.debug('PERFORMANCE', 'refreshToken()::Execution completed successfully in ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
-
                     return getTokenRecord();
                 } else {
-                    // Calculate and log execution time - HTTP ERROR case
-                    var endTime = Date.now();
-                    var executionTime = endTime - startTime;
-                    log.error('PERFORMANCE', 'refreshToken()::Execution failed (HTTP ' + response.code + ') after ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
-                    
                     log.error('DEBUG', 'FedEx OAuth HTTP Status Code: ' + response.code);
                     log.error('DEBUG', 'FedEx OAuth Error Message: ' + response.body);
                     throw error.create({
@@ -207,11 +193,6 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     });
                 }
             } catch (e) {
-                // Calculate and log execution time - EXCEPTION case
-                var endTime = Date.now();
-                var executionTime = endTime - startTime;
-                log.error('PERFORMANCE', 'refreshToken()::Execution failed with exception after ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
-                
                 log.error({
                     title: 'ERROR',
                     details: 'Error refreshing FedEx token: ' + e.message
@@ -729,25 +710,6 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     log.debug('Multiple Tracking Warning', 'No package lines found in Item Fulfillment');
                     return;
                 }
-
-                for (let p = 0; p < packageCount; p++) {
-                    let originalDesc = recordForUpdate.getSublistValue({
-                        sublistId: 'package',
-                        fieldId: 'packagedescr',
-                        line: p
-                    });
-                    let originalWeight = recordForUpdate.getSublistValue({
-                        sublistId: 'package',
-                        fieldId: 'packageweight',
-                        line: p
-                    });
-                    let originalTracking = recordForUpdate.getSublistValue({
-                        sublistId: 'package',
-                        fieldId: 'packagetrackingnumber',
-                        line: p
-                    });
-                    log.debug('FEDEX_HELPER_ORIGINAL_PACKAGE_' + p, 'Desc: "' + originalDesc + '", Weight: ' + originalWeight + ', Tracking: ' + originalTracking);
-                }
                 
                 // Group carton mappings by carton name for tracking assignment
                 var cartonToTrackingMap = {};
@@ -783,45 +745,29 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 }
                 
                 // Now find which package line corresponds to each carton and update tracking
-                // Match based on package description content, not array index
+                // The challenge is that NetSuite package lines may not directly correspond to cartons
+                // We'll use the carton mappings to find the line that should get each tracking number
                 
                 var packageUpdates = [];
                 
-                // For each package line, extract carton name from description and match to tracking
+                // For each package line, try to determine which carton it represents
                 for (var k = 0; k < packageCount; k++) {
-                    var packageDesc = recordForUpdate.getSublistValue({
-                        sublistId: 'package',
-                        fieldId: 'packagedescr',
-                        line: k
-                    }) || '';
-                    
-                    log.debug('Package Description Check', 'Package line ' + k + ': "' + packageDesc + '"');
-                    
-                    // Try to match this package description to a carton name
-                    var matchedCarton = null;
-                    var assignedTracking = null;
-                    
-                    // Check if package description contains any of our carton names
-                    for (var cartonName in cartonToTrackingMap) {
-                        if (packageDesc.indexOf(cartonName) !== -1) {
-                            matchedCarton = cartonName;
-                            assignedTracking = cartonToTrackingMap[cartonName];
-                            log.debug('Carton Match Found', 'Package line ' + k + ' description "' + packageDesc + '" matches carton "' + cartonName + '"');
-                            break;
-                        }
-                    }
-                    
-                    if (matchedCarton && assignedTracking) {
-                        packageUpdates.push({
-                            line: k,
-                            trackingNumber: assignedTracking,
-                            cartonName: matchedCarton,
-                            originalDescription: packageDesc
-                        });
+                    // Try to find the carton mapping that corresponds to this package line
+                    // Since packages are created in the same order as buildPackageLineItems,
+                    // we can use the sorted carton order
+                    if (k < sortedCartonNames.length) {
+                        var correspondingCarton = sortedCartonNames[k];
+                        var assignedTracking = cartonToTrackingMap[correspondingCarton];
                         
-                        log.debug('Package Mapping Success', 'Package line ' + k + ' -> Carton ' + matchedCarton + ' -> Tracking ' + assignedTracking);
-                    } else {
-                        log.debug('Package Mapping Failed', 'Package line ' + k + ' description "' + packageDesc + '" could not be matched to any carton');
+                        if (assignedTracking) {
+                            packageUpdates.push({
+                                line: k,
+                                trackingNumber: assignedTracking,
+                                cartonName: correspondingCarton
+                            });
+                            
+                            log.debug('Package Mapping', 'Package line ' + k + ' -> Carton ' + correspondingCarton + ' -> Tracking ' + assignedTracking);
+                        }
                     }
                 }
                 
@@ -835,7 +781,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         value: update.trackingNumber
                     });
                     
-                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' (carton: ' + update.cartonName + ') set to: ' + update.trackingNumber);
+                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' set to: ' + update.trackingNumber);
                 }
                 
                 // Save the record with all tracking number updates
@@ -1612,10 +1558,11 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Step 3: Build customer references once (same for all cartons)
                 var references = buildCustomerReferences(fulfillmentRecord, mappingRecord);
 
-                // Step 4: Create package for each carton (consolidated processing)
+                // Step 4: Create package for each carton
                 for (var cartonId in cartonGroups) {
-                    var cartonData = calculateCartonData(cartonGroups[cartonId]);
-                    var packageItem = buildCartonPackage(cartonData.weight, cartonId, references, cartonData.dimensions);
+                    var cartonWeight = calculateCartonWeight(cartonGroups[cartonId]);
+                    var cartonDimensions = calculateCartonDimensions(cartonGroups[cartonId]);
+                    var packageItem = buildCartonPackage(cartonWeight, cartonId, references, cartonDimensions);
                     packageLineItems.push(packageItem);
                 }
                 
@@ -1752,129 +1699,6 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             }
 
             return cartonGroups;
-        }
-
-        /**
-         * Calculate carton weight and dimensions by loading each item record once
-         * This consolidated approach optimizes performance by eliminating duplicate item record loads
-         *
-         * @param {Array} packshipRecords Array of PackShip records for this carton
-         * @returns {Object} Object with weight (number) and dimensions (object) properties
-         */
-        function calculateCartonData(packshipRecords) {
-            log.debug('Carton Data Calculation', 'Calculating weight and dimensions for ' + packshipRecords.length + ' items');
-            
-            var totalWeight = 0;
-            var largestVolume = 0;
-            var bestDimensions = { length: 0, width: 0, height: 0 };
-            
-            for (var i = 0; i < packshipRecords.length; i++) {
-                var packshipRecord = packshipRecords[i];
-                
-                if (!packshipRecord.item) {
-                    log.debug('Carton Data Warning', 'PackShip record ID ' + packshipRecord.id + ' has no item, skipping');
-                    continue;
-                }
-                
-                if (!packshipRecord.quantity || packshipRecord.quantity <= 0) {
-                    log.debug('Carton Data Warning', 'PackShip record ID ' + packshipRecord.id + ' has invalid quantity: ' + packshipRecord.quantity + ', skipping');
-                    continue;
-                }
-
-                try {
-                    log.debug('Carton Data Debug', 'Loading item ID: ' + packshipRecord.item + ' for PackShip record ' + packshipRecord.id);
-                    
-                    // Load the item record once for both weight and dimensions
-                    var itemRecord;
-                    var itemTypes = ['inventoryitem', 'kititem'];
-                    var loadSuccess = false;
-                    
-                    for (var t = 0; t < itemTypes.length; t++) {
-                        try {
-                            itemRecord = record.load({
-                                type: itemTypes[t],
-                                id: packshipRecord.item
-                            });
-                            loadSuccess = true;
-                            log.debug('Carton Data Debug', 'Successfully loaded item ' + packshipRecord.item + ' as ' + itemTypes[t]);
-                            break;
-                        } catch (typeError) {
-                            log.debug('Carton Data Debug', 'Failed to load item ' + packshipRecord.item + ' as ' + itemTypes[t]);
-                        }
-                    }
-                    
-                    if (!loadSuccess) {
-                        log.debug('Carton Data Warning', 'Could not load item ' + packshipRecord.item + ' with any item type, using defaults');
-                        continue;
-                    }
-                    
-                    // WEIGHT CALCULATION
-                    var itemWeight = itemRecord.getValue({ fieldId: 'weight' });
-                    log.debug('Carton Data Weight Debug', 'Raw weight value from weight: "' + itemWeight + '" (type: ' + typeof itemWeight + ')');
-                    
-                    var parsedWeight = parseFloat(itemWeight);
-                    log.debug('Carton Data Weight Debug', 'Parsed weight: ' + parsedWeight + ' (isNaN: ' + isNaN(parsedWeight) + ')');
-                    
-                    if (!itemWeight || itemWeight <= 0 || isNaN(parsedWeight)) {
-                        // Use 0 for invalid weights (will be handled by minimum weight logic later)
-                        itemWeight = 0;
-                        log.debug('Carton Data Weight Warning', 'Item ID ' + packshipRecord.item + ' has invalid weight, using 0');
-                    } else {
-                        itemWeight = parsedWeight;
-                        log.debug('Carton Data Weight Success', 'Item ID ' + packshipRecord.item + ' has valid weight: ' + itemWeight + ' lbs');
-                    }
-
-                    var itemTotalWeight = itemWeight * packshipRecord.quantity;
-                    totalWeight += itemTotalWeight;
-                    log.debug('Carton Data Weight Calculation', 'Item ' + packshipRecord.item + ': weight=' + itemWeight + ' lbs, qty=' + packshipRecord.quantity + ', total=' + itemTotalWeight + ' lbs');
-
-                    // DIMENSION CALCULATION
-                    var itemWidth = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_width' });
-                    var itemLength = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_length' });
-                    var itemHeight = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_height' });
-                    
-                    log.debug('Carton Data Dimension Debug', 'Item ' + packshipRecord.item + ' raw dimensions: W=' + itemWidth + ', L=' + itemLength + ', H=' + itemHeight);
-                    
-                    // Parse and validate dimensions
-                    var parsedWidth = parseFloat(itemWidth) || 0;
-                    var parsedLength = parseFloat(itemLength) || 0;
-                    var parsedHeight = parseFloat(itemHeight) || 0;
-                    
-                    log.debug('Carton Data Dimension Debug', 'Item ' + packshipRecord.item + ' parsed dimensions: W=' + parsedWidth + ', L=' + parsedLength + ', H=' + parsedHeight);
-                    
-                    // Calculate volume
-                    var volume = parsedWidth * parsedLength * parsedHeight;
-                    log.debug('Carton Data Dimension Calculation', 'Item ' + packshipRecord.item + ': volume=' + volume + ' cubic inches');
-                    
-                    // Check if this is the largest volume so far
-                    if (volume > largestVolume) {
-                        largestVolume = volume;
-                        bestDimensions = {
-                            length: parsedLength,
-                            width: parsedWidth,
-                            height: parsedHeight
-                        };
-                        log.debug('Carton Data Dimension Update', 'New largest volume item: ' + packshipRecord.item + ' with volume ' + volume + ' cubic inches');
-                    }
-                    
-                } catch (itemError) {
-                    log.error('Carton Data Item Error', 'Failed to process item ' + packshipRecord.item + ': ' + itemError.message);
-                }
-            }
-            
-            // Apply minimum weight of 1 lb per carton
-            if (totalWeight < 1) {
-                totalWeight = 1;
-                log.debug('Carton Data Weight Adjustment', 'Carton weight was less than 1 lb, adjusted to 1 lb minimum');
-            }
-            
-            log.debug('Carton Data Final', 'Final carton data - Weight: ' + totalWeight + ' lbs, Dimensions: ' + 
-                     bestDimensions.length + 'x' + bestDimensions.width + 'x' + bestDimensions.height + ' inches (volume: ' + largestVolume + ')');
-            
-            return {
-                weight: totalWeight,
-                dimensions: bestDimensions
-            };
         }
 
         /**
@@ -2561,14 +2385,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 });
 
                 // Update package tracking numbers with individual tracking numbers
-                var trackingUpdateStartTime = Date.now();
-                log.debug('PERFORMANCE', 'updateMultiplePackageTrackingNumbers()::Execution started at ' + new Date(trackingUpdateStartTime).toISOString());
-                
                 updateMultiplePackageTrackingNumbers(fulfillmentRecord.id, response.result);
-                
-                var trackingUpdateEndTime = Date.now();
-                var trackingUpdateExecutionTime = trackingUpdateEndTime - trackingUpdateStartTime;
-                log.debug('PERFORMANCE', 'updateMultiplePackageTrackingNumbers()::Execution completed in ' + trackingUpdateExecutionTime + 'ms (' + (trackingUpdateExecutionTime / 1000).toFixed(2) + ' seconds)');
 
                  // Update Item Fulfillment status to "Shipped" after successful label creation and save
                  try {
