@@ -18,6 +18,28 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
                 id: fulfillmentId,
                 isDynamic: true,
             });
+
+            // DEBUG: Log original package lines before processing
+            let originalPackageCount = recordToEdit.getLineCount({sublistId:'package'});
+            log.debug('PACKAGE_DEBUG', 'Original package count: ' + originalPackageCount);
+            for (let p = 0; p < originalPackageCount; p++) {
+                let originalDesc = recordToEdit.getSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagedescr',
+                    line: p
+                });
+                let originalWeight = recordToEdit.getSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packageweight',
+                    line: p
+                });
+                let originalTracking = recordToEdit.getSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagetrackingnumber',
+                    line: p
+                });
+                log.debug('ORIGINAL_PACKAGE_' + p, 'Desc: "' + originalDesc + '", Weight: ' + originalWeight + ', Tracking: ' + originalTracking);
+            }
             let items = recordHelper.foreachSublist(recordToEdit, 'item', ['item', 'quantity', 'itemtype', 'itemname', 'kitmemberof'])
                 .map(item => {
                     return {
@@ -29,8 +51,23 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
                     }
                 })
 
+            // DEBUG: Log all Item Fulfillment line items with kit relationships
+            log.debug('ITEM_DEBUG', 'Total Item Fulfillment lines: ' + items.length);
+            items.forEach((item, index) => {
+                log.debug('ITEM_LINE_' + index, 'ID: ' + item.id + ', Name: "' + item.name + '", Qty: ' + item.quantity + 
+                         ', Type: ' + item.type + ', KitMemberOf: ' + (item.kitMemberOf || 'NONE'));
+            });
+
             let itemDetailLookup = getItemDetail(items.map(item => item.id));
             log.debug('items', items)
+            
+            // DEBUG: Log item details lookup results
+            log.debug('ITEM_DETAIL_DEBUG', 'Item detail lookup results:');
+            Object.keys(itemDetailLookup).forEach(itemId => {
+                let detail = itemDetailLookup[itemId];
+                log.debug('ITEM_DETAIL_' + itemId, 'NumberOfBoxes: ' + detail.numberOfBoxes + 
+                         ', ShippingWeight: ' + detail.shippingWeight + ', ShipType: ' + detail.shipType);
+            });
             if (items.length === 0) {
                 log.debug('Case eSmallParcel', 'No kit items found');
                 return;
@@ -43,8 +80,10 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
             // Create one package line per unit quantity of each kit item
             let currentLine = 0
             // check stage
+            log.debug('CALCULATION_DEBUG', 'Starting package line calculation...');
             items.map(function (item) {
                 if (item.kitMemberOf) {
+                    log.debug('CALC_SKIP_MEMBER', 'Skipping kit member: ' + item.name + ' (member of: ' + item.kitMemberOf + ')');
                     return
                 }
                 let numberOfBoxes, quantity, totalQuantity
@@ -55,18 +94,23 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
                 }
                 quantity = item.quantity;
                 totalQuantity = Number(quantity) * Number(numberOfBoxes);
+                log.debug('CALC_ITEM_' + item.id, 'Item: ' + item.name + ', Qty: ' + quantity + 
+                         ', NumberOfBoxes: ' + numberOfBoxes + ', TotalQuantity: ' + totalQuantity);
                 currentLine += totalQuantity;
             })
             let packageLines = recordToEdit.getLineCount({sublistId:'package'});
+            log.debug('PACKAGE_COUNT_CHECK', 'Expected package lines: ' + currentLine + ', Actual package lines: ' + packageLines);
             if (packageLines !== currentLine) {
                 log.audit('package lines number is not as expected', {packageLines, currentLine})
             }
 
             currentLine = 0
+            log.debug('ASSIGNMENT_DEBUG', 'Starting package line assignment...');
             items.forEach(function (item) {
                 log.debug('items item', item)
                 log.debug('currentLine', currentLine)
                 if (item.kitMemberOf) {
+                    log.debug('ASSIGN_SKIP_MEMBER', 'Skipping kit member: ' + item.name + ' (member of: ' + item.kitMemberOf + ')');
                     // member item should not be listed
                     return
                 }
@@ -82,15 +126,30 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
                 }
                 quantity = item.quantity;
                 totalQuantity = Number(quantity) * Number(numberOfBoxes);
+                
+                log.debug('ASSIGN_ITEM_START', 'Processing item: ' + item.name + ' (ID: ' + item.id + ')');
+                log.debug('ASSIGN_ITEM_PARAMS', 'Qty: ' + quantity + ', NumberOfBoxes: ' + numberOfBoxes + 
+                         ', TotalQuantity: ' + totalQuantity + ', Starting at currentLine: ' + currentLine);
+                
                 for (let i = 0; i < totalQuantity; i++) {
+                    log.debug('ASSIGN_PACKAGE_' + currentLine, 'Assigning to package line ' + currentLine + ' (loop iteration ' + i + ')');
+                    
                     // Create individual package lines for each unit
                     recordToEdit.selectLine({
                         sublistId: 'package',
                         line: currentLine
                     });
 
+                    // Get original description before overwriting
+                    let originalDesc = recordToEdit.getCurrentSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagedescr'
+                    });
+
                     // let qty = carton.packShipTotalPackedQty.toFixed(1);
                     let contentDescription = item.name + '(' + '1.0' + ')';
+
+                    log.debug('ASSIGN_DESC_CHANGE', 'Package line ' + currentLine + ': "' + originalDesc + '" → "' + contentDescription + '"');
 
                     recordToEdit.setCurrentSublistValue({
                         sublistId: 'package',
@@ -99,16 +158,44 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
                     });
 
                     if (numberOfBoxesIsOne) { // only when umberOfBoxes is 1, we change the shipping weight
+                        let newWeight = itemDetailLookup[item.id].shippingWeight;
+                        log.debug('ASSIGN_WEIGHT_CHANGE', 'Package line ' + currentLine + ': Setting weight to ' + newWeight);
                         recordToEdit.setCurrentSublistValue({
                             sublistId: 'package',
                             fieldId: 'packageweight',
-                            value: itemDetailLookup[item.id].shippingWeight
+                            value: newWeight
                         });
+                    } else {
+                        log.debug('ASSIGN_WEIGHT_SKIP', 'Package line ' + currentLine + ': Skipping weight change (numberOfBoxes > 1)');
                     }
                     recordToEdit.commitLine({sublistId: 'package'});
                     currentLine++
                 }
+                log.debug('ASSIGN_ITEM_END', 'Completed item: ' + item.name + ', currentLine now: ' + currentLine);
             });
+
+            // DEBUG: Log final package lines before saving
+            let finalPackageCount = recordToEdit.getLineCount({sublistId:'package'});
+            log.debug('FINAL_PACKAGE_DEBUG', 'Final package count before save: ' + finalPackageCount);
+            for (let f = 0; f < finalPackageCount; f++) {
+                recordToEdit.selectLine({
+                    sublistId: 'package',
+                    line: f
+                });
+                let finalDesc = recordToEdit.getCurrentSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagedescr'
+                });
+                let finalWeight = recordToEdit.getCurrentSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packageweight'
+                });
+                let finalTracking = recordToEdit.getCurrentSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagetrackingnumber'
+                });
+                log.debug('FINAL_PACKAGE_' + f, 'Desc: "' + finalDesc + '", Weight: ' + finalWeight + ', Tracking: ' + finalTracking);
+            }
 
             recordToEdit.save();
             log.debug('Case eSmallParcel Completed', 'Package lines created for kit items');

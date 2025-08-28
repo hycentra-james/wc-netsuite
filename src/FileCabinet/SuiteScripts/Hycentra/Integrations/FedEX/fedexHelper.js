@@ -141,6 +141,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {record} Updated token record
          */
         function refreshToken(tokenRecord) {
+            // Start execution timer for performance profiling
+            var startTime = Date.now();
+            log.debug('PERFORMANCE', 'refreshToken()::Execution started at ' + new Date(startTime).toISOString());
+            
             // Get the properly formatted endpoint URL (with trailing slash)
             var baseUrl = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_endpoint' }) || "https://apis.fedex.com/";
 
@@ -183,8 +187,18 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     updateAccessToken(accessToken, expiresIn);
                     log.debug('DEBUG', 'refreshToken()::updateAccessToken success');
 
+                    // Calculate and log execution time - SUCCESS case
+                    var endTime = Date.now();
+                    var executionTime = endTime - startTime;
+                    log.debug('PERFORMANCE', 'refreshToken()::Execution completed successfully in ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+
                     return getTokenRecord();
                 } else {
+                    // Calculate and log execution time - HTTP ERROR case
+                    var endTime = Date.now();
+                    var executionTime = endTime - startTime;
+                    log.error('PERFORMANCE', 'refreshToken()::Execution failed (HTTP ' + response.code + ') after ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+                    
                     log.error('DEBUG', 'FedEx OAuth HTTP Status Code: ' + response.code);
                     log.error('DEBUG', 'FedEx OAuth Error Message: ' + response.body);
                     throw error.create({
@@ -193,6 +207,11 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     });
                 }
             } catch (e) {
+                // Calculate and log execution time - EXCEPTION case
+                var endTime = Date.now();
+                var executionTime = endTime - startTime;
+                log.error('PERFORMANCE', 'refreshToken()::Execution failed with exception after ' + executionTime + 'ms (' + (executionTime / 1000).toFixed(2) + ' seconds)');
+                
                 log.error({
                     title: 'ERROR',
                     details: 'Error refreshing FedEx token: ' + e.message
@@ -710,6 +729,25 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     log.debug('Multiple Tracking Warning', 'No package lines found in Item Fulfillment');
                     return;
                 }
+
+                for (let p = 0; p < packageCount; p++) {
+                    let originalDesc = recordForUpdate.getSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagedescr',
+                        line: p
+                    });
+                    let originalWeight = recordForUpdate.getSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packageweight',
+                        line: p
+                    });
+                    let originalTracking = recordForUpdate.getSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagetrackingnumber',
+                        line: p
+                    });
+                    log.debug('FEDEX_HELPER_ORIGINAL_PACKAGE_' + p, 'Desc: "' + originalDesc + '", Weight: ' + originalWeight + ', Tracking: ' + originalTracking);
+                }
                 
                 // Group carton mappings by carton name for tracking assignment
                 var cartonToTrackingMap = {};
@@ -745,29 +783,45 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 }
                 
                 // Now find which package line corresponds to each carton and update tracking
-                // The challenge is that NetSuite package lines may not directly correspond to cartons
-                // We'll use the carton mappings to find the line that should get each tracking number
+                // Match based on package description content, not array index
                 
                 var packageUpdates = [];
                 
-                // For each package line, try to determine which carton it represents
+                // For each package line, extract carton name from description and match to tracking
                 for (var k = 0; k < packageCount; k++) {
-                    // Try to find the carton mapping that corresponds to this package line
-                    // Since packages are created in the same order as buildPackageLineItems,
-                    // we can use the sorted carton order
-                    if (k < sortedCartonNames.length) {
-                        var correspondingCarton = sortedCartonNames[k];
-                        var assignedTracking = cartonToTrackingMap[correspondingCarton];
-                        
-                        if (assignedTracking) {
-                            packageUpdates.push({
-                                line: k,
-                                trackingNumber: assignedTracking,
-                                cartonName: correspondingCarton
-                            });
-                            
-                            log.debug('Package Mapping', 'Package line ' + k + ' -> Carton ' + correspondingCarton + ' -> Tracking ' + assignedTracking);
+                    var packageDesc = recordForUpdate.getSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagedescr',
+                        line: k
+                    }) || '';
+                    
+                    log.debug('Package Description Check', 'Package line ' + k + ': "' + packageDesc + '"');
+                    
+                    // Try to match this package description to a carton name
+                    var matchedCarton = null;
+                    var assignedTracking = null;
+                    
+                    // Check if package description contains any of our carton names
+                    for (var cartonName in cartonToTrackingMap) {
+                        if (packageDesc.indexOf(cartonName) !== -1) {
+                            matchedCarton = cartonName;
+                            assignedTracking = cartonToTrackingMap[cartonName];
+                            log.debug('Carton Match Found', 'Package line ' + k + ' description "' + packageDesc + '" matches carton "' + cartonName + '"');
+                            break;
                         }
+                    }
+                    
+                    if (matchedCarton && assignedTracking) {
+                        packageUpdates.push({
+                            line: k,
+                            trackingNumber: assignedTracking,
+                            cartonName: matchedCarton,
+                            originalDescription: packageDesc
+                        });
+                        
+                        log.debug('Package Mapping Success', 'Package line ' + k + ' -> Carton ' + matchedCarton + ' -> Tracking ' + assignedTracking);
+                    } else {
+                        log.debug('Package Mapping Failed', 'Package line ' + k + ' description "' + packageDesc + '" could not be matched to any carton');
                     }
                 }
                 
@@ -781,7 +835,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         value: update.trackingNumber
                     });
                     
-                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' set to: ' + update.trackingNumber);
+                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' (carton: ' + update.cartonName + ') set to: ' + update.trackingNumber);
                 }
                 
                 // Save the record with all tracking number updates
@@ -2385,7 +2439,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 });
 
                 // Update package tracking numbers with individual tracking numbers
+                var trackingUpdateStartTime = Date.now();
+                log.debug('PERFORMANCE', 'updateMultiplePackageTrackingNumbers()::Execution started at ' + new Date(trackingUpdateStartTime).toISOString());
+                
                 updateMultiplePackageTrackingNumbers(fulfillmentRecord.id, response.result);
+                
+                var trackingUpdateEndTime = Date.now();
+                var trackingUpdateExecutionTime = trackingUpdateEndTime - trackingUpdateStartTime;
+                log.debug('PERFORMANCE', 'updateMultiplePackageTrackingNumbers()::Execution completed in ' + trackingUpdateExecutionTime + 'ms (' + (trackingUpdateExecutionTime / 1000).toFixed(2) + ' seconds)');
 
                  // Update Item Fulfillment status to "Shipped" after successful label creation and save
                  try {
