@@ -23,8 +23,8 @@
  * get the itemfulfillment id by field 'custrecord_packship_itemfulfillment'on customrecord_packship_cartonitem
  * assume all customrecord_packship_cartonitem under a shipment would under the same itemfulfillment record
  */
-define(['N/record','N/search','N/log', 'N/url', 'N/runtime', '../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
-    (record, search, log, url, runtime, fedexHelper, printNodeLib, itemFulfillmentPackageHelper) => {
+define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
+    (record, search, log, fedexHelper, printNodeLib, itemFulfillmentPackageHelper) => {
         // Constants (field & record IDs)
         const REC_CARTON_ITEM = 'customrecord_packship_cartonitem';
         const REC_CARTON = 'customrecord_packship_carton';
@@ -171,29 +171,7 @@ define(['N/record','N/search','N/log', 'N/url', 'N/runtime', '../../Hycentra/Int
                         });
                         fedexHelper.createShipment(fulfillRec, false);
 
-                        const itemFulfillmentRec = record.load({
-                            type: record.Type.ITEM_FULFILLMENT,
-                            id: ifId,
-                            isDynamic: false
-                        });
-                        //after this call, it would pull the label into file cabinet sync
-                        //use another block to print the label
-                        const fedexLabelUrl = itemFulfillmentRec.getValue('custbody_shipping_label_url');
-                        const domain = url.resolveDomain({
-                            hostType: url.HostType.APPLICATION,
-                            accountId: runtime.accountId
-                        });
-                        log.debug('check is fedex label printing', `fedexLabelUrl ${fedexLabelUrl}`);
-                        if(fedexLabelUrl !== '') {
-                            log.debug('print fedex label', 'call print node lib');
-                            //get current runtime url
-                            const urls = fedexLabelUrl.split(',');
-                            if(urls.length === 1 && urls[0] === '') return;
-                            urls.forEach((url) => {
-                                if(url === '') return; // skip empty URLs
-                                printNodeLib.printByPrintNode('Print Fedex Label from NS', domain+url, 'FedEx Label', 1);
-                            });
-                        }
+                        // Printing labels have been moved to fedexHelper.js for optimization purpose
                 } else {
                         log.debug({ title: 'FedEx Auto Print Skip', details: 'Ship method not FedEx Ground on transition to Packed (id=' + shipMethodId + ')' });
                 }

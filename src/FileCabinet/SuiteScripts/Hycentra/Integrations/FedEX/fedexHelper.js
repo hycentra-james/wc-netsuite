@@ -4,8 +4,8 @@
  * @NModuleScope SameAccount
  */
 
-define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search'],
-    function (runtime, record, format, https, error, log, file, search) {
+define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search', 'N/url', '../../../Concentrus/PackShipTemplate/Con_Lib_Print_Node.js'],
+    function (runtime, record, format, https, error, log, file, search, url, printNodeLib) {
         const CONFIG_RECORD_TYPE = 'customrecord_hyc_fedex_config';
         const SANDBOX_CONFIG_RECORD_ID = 1; // FedEx Sandbox config record ID [See Custom Record: customrecord_hyc_fedex_config]
         const PRODUCTION_CONFIG_RECORD_ID = 2; // FedEx Production config record ID [See Custom Record: customrecord_hyc_fedex_config]
@@ -2359,6 +2359,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Join multiple label URLs with comma
                 var labelUrlString = labelUrls.join(',');
 
+                var printFedExLabelsStartTime = Date.now();
+                // Print the labels
+                printFedExLabels(labelUrlString);
+                var printFedExLabelsEndTime = Date.now();
+                var fromStartToPrintExecutionTime = printFedExLabelsEndTime - startTime;
+                var printFedExLabelsExecutionTime = printFedExLabelsEndTime - printFedExLabelsStartTime;
+                log.debug('PERFORMANCE', 'printFedExLabels()::fromStartToPrintExecutionTime completed successfully in ' + fromStartToPrintExecutionTime + 'ms (' + (fromStartToPrintExecutionTime / 1000).toFixed(2) + ' seconds)');
+                log.debug('PERFORMANCE', 'printFedExLabels()::printFedExLabelsExecutionTime completed successfully in ' + printFedExLabelsExecutionTime + 'ms (' + (printFedExLabelsExecutionTime / 1000).toFixed(2) + ' seconds)');
+
                 log.debug('FedEx Response Processing', 'Tracking: ' + trackingNumber +
                     ', Labels: ' + labelUrlString +
                     ', Transaction ID: ' + transactionId +
@@ -2446,6 +2455,106 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             }
         }
 
+        /**
+         * Print FedEx labels using PrintNode
+         *
+         * @param {string} fedExLabelUrl Comma separated list of label URLs
+         * @returns {Object} Print result with success status and message
+         */
+        function printFedExLabels(fedexLabelUrl) {
+            try {
+                log.debug('FedEx Label Print', 'Starting label print, fedexLabelUrl: ' + fedexLabelUrl);
+
+                
+                if (!fedexLabelUrl || fedexLabelUrl === '') {
+                    log.debug('FedEx Label Print', 'fedexLabelUrl cannot be empty');
+                    return {
+                        success: false,
+                        message: 'No FedEx label URL found'
+                    };
+                }
+
+                log.debug('FedEx Label Print', 'Found label URL(s): ' + fedexLabelUrl);
+
+                // Get current runtime domain
+                var domain = url.resolveDomain({
+                    hostType: url.HostType.APPLICATION,
+                    accountId: runtime.accountId
+                });
+
+                // Split multiple URLs (comma-separated)
+                var urls = fedexLabelUrl.split(',');
+                
+                if (urls.length === 1 && urls[0] === '') {
+                    log.debug('FedEx Label Print', 'Empty label URL list');
+                    return {
+                        success: false,
+                        message: 'Empty label URL list'
+                    };
+                }
+
+                var printedCount = 0;
+                var errors = [];
+
+                // Print each label
+                urls.forEach(function(labelUrl, index) {
+                    if (labelUrl === '') {
+                        log.debug('FedEx Label Print', 'Skipping empty URL at index: ' + index);
+                        return; // Skip empty URLs
+                    }
+
+                    try {
+                        // Construct full URL if it's a relative path
+                        var fullUrl = labelUrl.startsWith('http') ? labelUrl : domain + labelUrl;
+                        
+                        log.debug('FedEx Label Print', 'Printing label ' + (index + 1) + ': ' + fullUrl);
+                        
+                        // Call PrintNode library to print the label
+                        printNodeLib.printByPrintNode(
+                            'Print FedEx Label from NS', 
+                            fullUrl, 
+                            'FedEx Label', 
+                            1
+                        );
+                        
+                        printedCount++;
+                        log.debug('FedEx Label Print Success', 'Successfully sent label ' + (index + 1) + ' to printer');
+                        
+                    } catch (printError) {
+                        var errorMsg = 'Failed to print label ' + (index + 1) + ': ' + printError.message;
+                        log.error('FedEx Label Print Error', errorMsg);
+                        errors.push(errorMsg);
+                    }
+                });
+
+                // Return result summary
+                var result = {
+                    success: printedCount > 0,
+                    message: 'Printed ' + printedCount + ' of ' + urls.length + ' labels',
+                    printedCount: printedCount,
+                    totalLabels: urls.length,
+                    errors: errors
+                };
+
+                if (errors.length > 0) {
+                    result.message += '. Errors: ' + errors.join('; ');
+                }
+
+                log.audit('FedEx Label Print Complete', result.message);
+                return result;
+
+            } catch (e) {
+                var errorMsg = 'Error printing FedEx labels for fulfillment ' + fulfillmentId + ': ' + e.message;
+                log.error('FedEx Label Print Error', errorMsg + '\nStack: ' + e.stack);
+                
+                return {
+                    success: false,
+                    message: errorMsg,
+                    error: e.message
+                };
+            }
+        }
+
         return {
             getTokenRecord: getTokenRecord,
             validateToken: validateToken,
@@ -2461,7 +2570,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getServiceType: getServiceType,
             getPackagingType: getPackagingType,
             getCurrentDateString: getCurrentDateString,
-            createShipment: createShipment
+            createShipment: createShipment,
+            printFedExLabels: printFedExLabels
         };
     }
 ); 
