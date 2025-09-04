@@ -10,6 +10,7 @@
  ||  1.2     Dec 23 2016  Adolfo Garza  Added support for HostKey ||
  ||                                     Port and Type             ||
   \= = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = */
+  // Youtube Video: https://www.youtube.com/watch?v=azxo7GS3xRQ
  
 var HTTPSMODULE, SFTPMODULE, SERVERWIDGETMODULE;
 var HOST_KEY_TOOL_URL = 'https://ursuscode.com/tools/sshkeyscan.php?url=';
