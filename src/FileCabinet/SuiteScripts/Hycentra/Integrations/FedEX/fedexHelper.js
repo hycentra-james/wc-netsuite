@@ -1110,7 +1110,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             log.debug('Shipping Address Success', 'Using shippingaddress subrecord');
                             return {
                                 "contact": {
-                                    "personName": shippingAddressSubrecord.getValue({ fieldId: 'attention' }) || 'Customer',
+                                    "personName": shippingAddressSubrecord.getValue({ fieldId: 'attention' }) || 
+                                                 shippingAddressSubrecord.getValue({ fieldId: 'addressee' }) || 
+                                                 'Customer',
                                     "phoneNumber": validatePhoneNumber(shippingAddressSubrecord.getValue({ fieldId: 'addrphone' }))
                                 },
                                 "address": {
