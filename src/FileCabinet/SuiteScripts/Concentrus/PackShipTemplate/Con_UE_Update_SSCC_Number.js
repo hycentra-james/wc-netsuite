@@ -92,7 +92,7 @@ define(['N/record','N/log','N/runtime','N/search','N/url','../../Hycentra/ItemFu
                 }
 
                 for (let i = 0; i < lineCount; i++) {
-                    const existing = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: SSCC_FIELD_ID, line: i }) || '';
+                    const isSsccGenerated = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: SSCC_FIELD_ID, line: i }) || '';
                     const qty = Number(fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'quantity', line: i })) || 0;
                     const itemId = fulfillRec.getSublistValue({ sublistId: 'item', fieldId: 'item', line: i });
                     if (!itemId) continue;
@@ -105,7 +105,7 @@ define(['N/record','N/log','N/runtime','N/search','N/url','../../Hycentra/ItemFu
                     
                     log.debug({ 
                         title: `SSCC Debug - Line ${i}`, 
-                        details: `Item: ${itemText} (ID: ${itemId}), Qty: ${qty}, Existing SSCC: ${existing ? 'YES' : 'NO'}, Exists in SO: ${existsInSO ? 'YES' : 'NO'}` 
+                        details: `Item: ${itemText} (ID: ${itemId}), Qty: ${qty}, Existing SSCC: ${isSsccGenerated ? 'YES' : 'NO'}, Exists in SO: ${existsInSO ? 'YES' : 'NO'}` 
                     });
                     
                     // Skip items that don't exist in the original Sales Order (WMS-added member items)
@@ -133,6 +133,8 @@ define(['N/record','N/log','N/runtime','N/search','N/url','../../Hycentra/ItemFu
                     });
                     
                     if (shipUnits <= 0) continue;
+                    // Skip SSCC Generation if it's already generated
+                    if (isSsccGenerated) continue;
 
                     const codes = [];
                     for (let n = 0; n < shipUnits; n++) {
