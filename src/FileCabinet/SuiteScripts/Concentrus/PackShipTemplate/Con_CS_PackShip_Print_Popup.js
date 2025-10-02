@@ -168,6 +168,31 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
             id: soId,
             values: {[FIELD_PRO_NUMBER]: value},
         });
+
+         // Check if it's Home Depot / Lowes customer
+         const customerId = getHidden('custpage_con_ps_customer');
+         const shipMethodId = getHidden('custpage_con_ps_shipmethod');
+         if (customerCfg.isHomeDepot(customerId) || (customerCfg.isLowes(customerId) && shipMethodId !== '3788')) {
+             // call print all function
+             conPsPrintAll();
+         } else if (customerCfg.isLowes(customerId) && shipMethodId === '3788') {
+            // Print Packing Slip for Lowe's with 3788 (Pilot) ship method ONLY
+            const packingSlipUrl = printPackingSlipWithApi(true);
+            if (packingSlipUrl){
+                printNode.printByPrintNode('Printing Packing Slip From NS', packingSlipUrl, REPORT_TYPE.PACKING_SLIP, 1);
+            }
+         }
+ 
+         // Mark Item Fulfillment status as shipped
+         const ifId = getHidden('custpage_con_ps_ifid');
+         if (ifId) {
+             record.submitFields({
+                 type: record.Type.ITEM_FULFILLMENT,
+                 id: ifId,
+                 values: {shipstatus: 'C'},
+             });
+         }
+
         location.reload();
     }
 
