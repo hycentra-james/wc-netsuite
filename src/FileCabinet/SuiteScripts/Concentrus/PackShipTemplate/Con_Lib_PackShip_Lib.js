@@ -181,11 +181,37 @@ define(['N/search','N/record','N/log'], (search, record, log) => {
       const ifId = first[0].getValue('internalid');
       const codes = [];
       const rawByLine = [];
+      const codesLine = {};
+      const itemDict = {};//key = item Id, value = { quantity, boxes, palletQty}
       try {
         const ifRec = record.load({ type: record.Type.ITEM_FULFILLMENT, id: ifId, isDynamic:false });
         const lineCount = ifRec.getLineCount({ sublistId: 'item' });
         for (let i=0;i<lineCount;i++) {
           const raw = (ifRec.getSublistValue({ sublistId:'item', fieldId: ssccFieldId, line:i }) || '').trim();
+          const ssccVal = ifRec.getSublistValue({ sublistId:'item', fieldId: ssccFieldId, line:i })
+            if(ssccVal) {
+                const ssccs = ssccVal.split(',').map(s=>s.trim());
+                ssccs.forEach(sscc => {
+                    codesLine[sscc] = {}
+                    const itemId =  ifRec.getSublistValue({sublistId: 'item', fieldId: 'item', line: i}) || '';
+                    let data = itemDict[itemId];
+                    if(!data){
+                        const searchObj = search.lookupFields({
+                            type: 'item',
+                            id: itemId,
+                            columns: ['custitem_fmt_no_boxes', 'custitem_fmt_pallet_quantity']
+                        });
+                        data = {
+                            itemId:itemId,
+                            boxes: Number(searchObj['custitem_fmt_no_boxes']) || 0,
+                            palletQty: Number(searchObj['custitem_fmt_pallet_quantity']) || 0,
+                            quantity: ifRec.getSublistValue({sublistId: 'item', fieldId: 'quantity', line: i}) || 0
+                        }
+                        itemDict[itemId] = data;
+                    }
+                    codesLine[sscc] = data;
+                });
+            }
           rawByLine.push(raw);
           if (raw) {
             raw.split(',').forEach(part => {
@@ -196,9 +222,9 @@ define(['N/search','N/record','N/log'], (search, record, log) => {
         }
       } catch (e) {
         log.error({ title:'Load IF for ALL SSCC failed', details: e.message });
-        return { itemFulfillmentId: ifId, codes, rawByLine };
+        return { itemFulfillmentId: ifId, codes, rawByLine, codesLine};
       }
-      return { itemFulfillmentId: ifId, codes, rawByLine };
+      return { itemFulfillmentId: ifId, codes, rawByLine, codesLine};
     } catch (err) {
       log.error({ title:'getAllSSCCBySalesOrder error', details: err.message });
       return { itemFulfillmentId: null, codes: [], rawByLine: [] };

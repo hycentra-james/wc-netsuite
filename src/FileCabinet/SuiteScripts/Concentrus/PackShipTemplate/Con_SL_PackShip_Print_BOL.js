@@ -98,7 +98,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
     const totals = totalsLib.computeShipmentTotals(soId, customerId);
     let carrierInfoInText = '';
     totals.lines.forEach(l => {
-      carrierInfoInText += `\n<tr>\n  <td align="center" colspan="1">${l.palletQtyPerUnit || '0'}</td>\n  <td align="center" colspan="1"> PLT</td>\n  <td align="center" colspan="1">${l.lineBoxes || ''}</td>\n  <td align="center" colspan="1">Carton</td>\n  <td align="center" colspan="1">${l.lineWeight.toFixed(1)}</td>\n  <td align="center" colspan="1"></td>\n  <td align="left" colspan="6">${l.commodity}</td>\n  <td align="center" colspan="1">${escapeXml(l.nmfc)}</td>\n  <td align="center" colspan="1">${customerId === CUSTOMER.LOWES_HOME_CENTERS_LLC ? '70' : escapeXml(l.freightClass)}</td>\n</tr>`;
+      carrierInfoInText += `\n<tr>\n  <td align="center" colspan="1">${l.linePalletQty || '0'}</td>\n  <td align="center" colspan="1"> PLT</td>\n  <td align="center" colspan="1">${l.lineBoxes || ''}</td>\n  <td align="center" colspan="1">Carton</td>\n  <td align="center" colspan="1">${l.lineWeight.toFixed(1)}</td>\n  <td align="center" colspan="1"></td>\n  <td align="left" colspan="6">${l.commodity}</td>\n  <td align="center" colspan="1">${escapeXml(l.nmfc)}</td>\n  <td align="center" colspan="1">${customerId === CUSTOMER.LOWES_HOME_CENTERS_LLC ? '70' : escapeXml(l.freightClass)}</td>\n</tr>`;
     });
     return { carrierInfoInText, totalHandlingUnit: totals.totalPalletQty, totalPackage: totals.totalBoxes, totalWeight: totals.totalWeight, totalPalletQty: totals.totalPalletQty };
   }
