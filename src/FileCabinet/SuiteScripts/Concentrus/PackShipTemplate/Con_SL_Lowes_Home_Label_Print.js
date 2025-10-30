@@ -48,6 +48,25 @@ define(['N/search', 'N/record', 'N/render', 'N/file', 'N/log', '../../Hycentra/I
         return ssccRaw || '';
     }
 
+    function updateSSCCList(ssccList, codesLine) {
+        log.debug('updateSSCCList - before', ssccList);
+        log.debug('updateSSCCList - before2', codesLine);
+        // Before Lowe's SSCC count = Number of Boxes * Qty, Copies from Number of Boxes * Qty
+        // Now Lowe's SSCC count = Pallet Qty * Qty, Copies from Number of Boxes * Qty
+        // Duplicate the SSCC codes based on Boxes(As Qty already considered in SSCC generation)
+        const updatedSSCCList = [];
+        for (const raw in codesLine) {
+            if (!raw) continue;
+            const entry = codesLine[raw];
+            const boxes = Number(entry.boxes) || 0;
+            for (let i=0;i<boxes;i++) {
+                updatedSSCCList.push(raw);
+            }
+        }
+        log.debug('updateSSCCList - after', updatedSSCCList);
+        return updatedSSCCList;
+    }
+
     function onRequest(context) {
         if (context.request.method === 'GET') {
             try {
@@ -79,8 +98,9 @@ define(['N/search', 'N/record', 'N/render', 'N/file', 'N/log', '../../Hycentra/I
                 const customerId = so.getValue('entity');
                 const totals = packShipLib.computeShipmentTotals(salesOrderId, customerId);
                 // All SSCC codes across fulfillment (if any)
-                const { codes: allCodes } = packShipLib.getAllSSCCBySalesOrder(salesOrderId);
-                const ssccList = allCodes;
+                const { codes: allCodes , codesLine} = packShipLib.getAllSSCCBySalesOrder(salesOrderId);
+                let ssccList = allCodes;
+                ssccList = updateSSCCList(ssccList, codesLine);
                 const ssccRaw = ssccList.join(',');
                 const shipUnitCountStrings = ssccList.length ? ssccList.map((_,i)=>`${i+1} OF ${ssccList.length}`) : buildShipUnitCountStringsFromLines(totals.lines);
 
