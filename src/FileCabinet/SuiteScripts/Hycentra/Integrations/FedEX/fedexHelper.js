@@ -573,24 +573,41 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     
                     if (boxDefinitions.length === 0) {
                         // Not a kit item, try direct matching
-                        log.debug('Direct Matching', 'Line ' + lineItem.line + ' is not a kit, trying direct match for item ' + lineItem.itemId);
-                        // For inventory items, match directly
-                        for (var m = 0; m < cartonNames.length; m++) {
+                        log.debug('Direct Matching', 'Line ' + lineItem.line + ' is not a kit, trying direct match for item ' + lineItem.itemId + ', qty ' + lineItem.quantity);
+                        // For inventory items, match directly - need to match one carton per quantity
+                        var matchedCount = 0;
+                        for (var m = 0; m < cartonNames.length && matchedCount < lineItem.quantity; m++) {
                             var cartonName = cartonNames[m];
                             var cartonContents = cartonGroups[cartonName];
                             log.debug('Direct Match Check', 'Checking carton ' + cartonName + ' contents: ' + JSON.stringify(cartonContents) + ' for item ' + lineItem.itemId);
+                            
+                            // Check if carton already mapped
+                            var alreadyMapped = false;
+                            for (var p = 0; p < cartonMappings.length; p++) {
+                                if (cartonMappings[p].cartonName === cartonName) {
+                                    alreadyMapped = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (alreadyMapped) {
+                                log.debug('Direct Match Skip', 'Carton ' + cartonName + ' already mapped, skipping');
+                                continue;
+                            }
                             
                             if (cartonContents.indexOf(lineItem.itemId) !== -1) {
                                 cartonMappings.push({
                                     cartonName: cartonName,
                                     lineNumber: lineItem.line,
                                     boxNumber: 1,
+                                    quantityInstance: matchedCount + 1,
                                     matched: true
                                 });
-                                log.debug('Direct Match Success', 'Carton ' + cartonName + ' matches line ' + lineItem.line);
-                                break;
+                                matchedCount++;
+                                log.debug('Direct Match Success', 'Carton ' + cartonName + ' matches line ' + lineItem.line + ' (match ' + matchedCount + ' of ' + lineItem.quantity + ')');
                             }
                         }
+                        log.debug('Direct Matching Complete', 'Matched ' + matchedCount + ' cartons for line ' + lineItem.line + ' (expected ' + lineItem.quantity + ')');
                     } else {
                         // Kit item - match each box for each quantity
                         log.debug('Kit Matching', 'Line ' + lineItem.line + ' is kit with ' + boxDefinitions.length + ' boxes, quantity ' + lineItem.quantity);
@@ -654,14 +671,182 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Extract sequence number from carton name (e.g., "SO206966-1" -> "1")
+         *
+         * @param {string} cartonName The carton name (e.g., "SO206966-1")
+         * @returns {number|null} Sequence number or null if not found
+         */
+        function extractCartonSequenceNumber(cartonName) {
+            try {
+                if (!cartonName) {
+                    return null;
+                }
+                
+                // Extract sequence number from carton name format: "SO206966-1" or "SO206966-2"
+                // Look for pattern: "-" followed by digits at the end
+                var match = cartonName.toString().match(/-(\d+)$/);
+                if (match && match[1]) {
+                    var sequenceNumber = parseInt(match[1], 10);
+                    log.debug('Carton Sequence Extract', 'Carton "' + cartonName + '" -> Sequence: ' + sequenceNumber);
+                    return sequenceNumber;
+                }
+                
+                log.debug('Carton Sequence Extract', 'Could not extract sequence from carton name: "' + cartonName + '"');
+                return null;
+            } catch (e) {
+                log.error('Carton Sequence Extract Error', 'Error extracting sequence from "' + cartonName + '": ' + e.message);
+                return null;
+            }
+        }
+
+        /**
+         * Parse packagedescr to extract item information (e.g., "MI18CR01CG-000NH0101(1.0)" -> item name)
+         *
+         * @param {string} packageDescr The package description from packagedescr field
+         * @returns {Object|null} Object with itemName or null if not parseable
+         */
+        function parsePackageDescription(packageDescr) {
+            try {
+                if (!packageDescr) {
+                    return null;
+                }
+                
+                // Format: "ITEMNAME(quantity)" or "ITEMNAME(quantity.0)"
+                // Extract item name before the opening parenthesis
+                var match = packageDescr.toString().match(/^(.+?)\([\d.]+\)$/);
+                if (match && match[1]) {
+                    var itemName = match[1].trim();
+                    log.debug('Package Description Parse', 'Parsed "' + packageDescr + '" -> Item: "' + itemName + '"');
+                    return {
+                        itemName: itemName
+                    };
+                }
+                
+                log.debug('Package Description Parse', 'Could not parse package description: "' + packageDescr + '"');
+                return null;
+            } catch (e) {
+                log.error('Package Description Parse Error', 'Error parsing "' + packageDescr + '": ' + e.message);
+                return null;
+            }
+        }
+
+        /**
+         * Get kit member item IDs from a kit item
+         *
+         * @param {string} kitItemId The internal ID of the kit item
+         * @returns {Array} Array of member item IDs
+         */
+        function getKitMemberItemIds(kitItemId) {
+            try {
+                var kitRecord = record.load({
+                    type: record.Type.KIT_ITEM,
+                    id: kitItemId
+                });
+                
+                var memberCount = kitRecord.getLineCount({ sublistId: 'member' });
+                var memberItems = [];
+                
+                for (var i = 0; i < memberCount; i++) {
+                    var memberId = kitRecord.getSublistValue({
+                        sublistId: 'member',
+                        fieldId: 'item',
+                        line: i
+                    });
+                    if (memberId) {
+                        memberItems.push(memberId.toString());
+                    }
+                }
+                
+                log.debug('Kit Member Items', 'Kit ' + kitItemId + ' has ' + memberItems.length + ' members: ' + JSON.stringify(memberItems));
+                return memberItems;
+            } catch (e) {
+                log.debug('Kit Member Items', 'Item ' + kitItemId + ' is not a kit: ' + e.message);
+                return [];
+            }
+        }
+
+        /**
+         * Match PackShip carton to package line by comparing contents
+         * Handles both inventory items and kits (by checking kit member items)
+         *
+         * @param {Array} cartonItems Array of item IDs from PackShip carton
+         * @param {string} packageItemName Item name from packagedescr (e.g., "MI18CR01CG-000NH0101")
+         * @param {record} fulfillmentRecord Item Fulfillment record for item lookup
+         * @returns {boolean} True if carton matches package line
+         */
+        function matchCartonToPackageByContent(cartonItems, packageItemName, fulfillmentRecord) {
+            try {
+                // Load Item Fulfillment line items to find item ID from name
+                var lineCount = fulfillmentRecord.getLineCount({ sublistId: 'item' });
+                for (var i = 0; i < lineCount; i++) {
+                    var lineItemName = fulfillmentRecord.getSublistText({
+                        sublistId: 'item',
+                        fieldId: 'item',
+                        line: i
+                    });
+                    
+                    // Check if package item name matches this line item name
+                    if (lineItemName === packageItemName) {
+                        var lineItemId = fulfillmentRecord.getSublistValue({
+                            sublistId: 'item',
+                            fieldId: 'item',
+                            line: i
+                        });
+                        
+                        var lineItemType = fulfillmentRecord.getSublistValue({
+                            sublistId: 'item',
+                            fieldId: 'itemtype',
+                            line: i
+                        });
+                        
+                        log.debug('Content Match Check', 'Checking line item "' + packageItemName + '" (ID: ' + lineItemId + ', Type: ' + lineItemType + ') against carton items: ' + JSON.stringify(cartonItems));
+                        
+                        // If it's a kit, get member items and check if carton contains them
+                        if (lineItemType === 'Kit') {
+                            var kitMemberItems = getKitMemberItemIds(lineItemId);
+                            if (kitMemberItems.length > 0) {
+                                // Check if carton contains any kit member items
+                                var matchedMembers = 0;
+                                for (var m = 0; m < kitMemberItems.length; m++) {
+                                    if (cartonItems.indexOf(kitMemberItems[m]) !== -1) {
+                                        matchedMembers++;
+                                    }
+                                }
+                                
+                                // If carton contains at least one kit member, it's a match
+                                if (matchedMembers > 0) {
+                                    log.debug('Content Match Found (Kit)', 'Package kit "' + packageItemName + '" (ID: ' + lineItemId + ') has ' + matchedMembers + ' members in carton');
+                                    return true;
+                                }
+                            }
+                        } else {
+                            // Inventory item - check if this item ID is in the carton
+                            if (cartonItems.indexOf(lineItemId.toString()) !== -1) {
+                                log.debug('Content Match Found (Inventory)', 'Package item "' + packageItemName + '" (ID: ' + lineItemId + ') found in carton');
+                                return true;
+                            }
+                        }
+                    }
+                }
+                
+                log.debug('Content Match Failed', 'Package item "' + packageItemName + '" not found in carton items: ' + JSON.stringify(cartonItems));
+                return false;
+            } catch (e) {
+                log.error('Content Match Error', 'Error matching carton to package: ' + e.message);
+                return false;
+            }
+        }
+
+        /**
          * Update multiple package tracking numbers from FedEx response
+         * Matches based on packagecartonnumber field to extract sequence number
          *
          * @param {string} fulfillmentId The Item Fulfillment record ID
          * @param {Object} fedexResponse The complete FedEx API response
          */
         function updateMultiplePackageTrackingNumbers(fulfillmentId, fedexResponse) {
             try {
-                log.debug('Multiple Tracking Update', 'Starting content-based tracking update for fulfillment: ' + fulfillmentId);
+                log.debug('Multiple Tracking Update', 'Starting carton-number-based tracking update for fulfillment: ' + fulfillmentId);
                 
                 // Extract tracking numbers from FedEx response
                 if (!fedexResponse || !fedexResponse.output || !fedexResponse.output.transactionShipments) {
@@ -680,22 +865,27 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 
                 log.debug('Multiple Tracking Info', 'Master tracking: ' + masterTrackingNumber + ', Pieces: ' + pieceResponses.length);
                 
-                // Get PackShip records for content matching
-                var packshipRecords = searchPackShipRecords(fulfillmentId);
-                if (packshipRecords.length === 0) {
-                    log.debug('Multiple Tracking Warning', 'No PackShip records found, falling back to sequential assignment');
-                    // Fall back to the old sequential method
-                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
-                    return;
+                // Build a map of packageSequenceNumber -> tracking number
+                var sequenceToTrackingMap = {};
+                for (var i = 0; i < pieceResponses.length; i++) {
+                    var pieceResponse = pieceResponses[i];
+                    var packageSequenceNumber = pieceResponse.packageSequenceNumber;
+                    var trackingNumber;
+                    
+                    if (packageSequenceNumber === 1) {
+                        // First package gets master tracking number
+                        trackingNumber = masterTrackingNumber;
+                        log.debug('FedEx Sequence Mapping', 'Sequence ' + packageSequenceNumber + ' -> Master tracking: ' + trackingNumber);
+                    } else {
+                        // Subsequent packages get individual tracking numbers
+                        trackingNumber = pieceResponse.trackingNumber;
+                        log.debug('FedEx Sequence Mapping', 'Sequence ' + packageSequenceNumber + ' -> Tracking: ' + trackingNumber);
+                    }
+                    
+                    sequenceToTrackingMap[packageSequenceNumber] = trackingNumber;
                 }
                 
-                // Match cartons to line items based on content
-                var cartonMappings = matchCartonsToLines(fulfillmentId, packshipRecords, pieceResponses);
-                if (cartonMappings.length === 0) {
-                    log.debug('Multiple Tracking Warning', 'No carton mappings found, falling back to sequential assignment');
-                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
-                    return;
-                }
+                log.debug('FedEx Sequence Map', 'Built sequence map: ' + JSON.stringify(sequenceToTrackingMap));
                 
                 // Load the Item Fulfillment record for updating
                 var recordForUpdate = record.load({
@@ -711,64 +901,67 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     return;
                 }
                 
-                // Group carton mappings by carton name for tracking assignment
-                var cartonToTrackingMap = {};
-                var sortedCartonNames = [];
-                
-                // Get unique carton names in sorted order
-                for (var i = 0; i < cartonMappings.length; i++) {
-                    var cartonName = cartonMappings[i].cartonName;
-                    if (sortedCartonNames.indexOf(cartonName) === -1) {
-                        sortedCartonNames.push(cartonName);
-                    }
-                }
-                sortedCartonNames.sort();
-                
-                log.debug('Carton Order', 'Sorted cartons for tracking assignment: ' + JSON.stringify(sortedCartonNames));
-                
-                // Assign tracking numbers to cartons in sorted order
-                for (var j = 0; j < sortedCartonNames.length && j < pieceResponses.length; j++) {
-                    var cartonName = sortedCartonNames[j];
-                    var trackingNumber;
-                    
-                    if (j === 0) {
-                        // First carton gets master tracking number
-                        trackingNumber = masterTrackingNumber;
-                        log.debug('Carton Tracking', 'Carton ' + cartonName + ' (first) gets master tracking: ' + trackingNumber);
-                    } else {
-                        // Subsequent cartons get individual tracking numbers
-                        trackingNumber = pieceResponses[j].trackingNumber;
-                        log.debug('Carton Tracking', 'Carton ' + cartonName + ' gets tracking: ' + trackingNumber);
-                    }
-                    
-                    cartonToTrackingMap[cartonName] = trackingNumber;
-                }
-                
-                // Now find which package line corresponds to each carton and update tracking
-                // The challenge is that NetSuite package lines may not directly correspond to cartons
-                // We'll use the carton mappings to find the line that should get each tracking number
-                
+                // Match package lines to FedEx responses based on packagecartonnumber sequence
                 var packageUpdates = [];
+                var matchedSequences = [];
                 
-                // For each package line, try to determine which carton it represents
+                // For each package line, extract sequence number from packagecartonnumber and match with FedEx sequence
                 for (var k = 0; k < packageCount; k++) {
-                    // Try to find the carton mapping that corresponds to this package line
-                    // Since packages are created in the same order as buildPackageLineItems,
-                    // we can use the sorted carton order
-                    if (k < sortedCartonNames.length) {
-                        var correspondingCarton = sortedCartonNames[k];
-                        var assignedTracking = cartonToTrackingMap[correspondingCarton];
+                    try {
+                        // Get the carton number from packagecartonnumber field
+                        var packageCartonNumber = recordForUpdate.getSublistValue({
+                            sublistId: 'package',
+                            fieldId: 'packagecartonnumber',
+                            line: k
+                        });
                         
-                        if (assignedTracking) {
+                        log.debug('Package Line Info', 'Package line ' + k + ', packagecartonnumber: "' + packageCartonNumber + '"');
+                        
+                        if (!packageCartonNumber) {
+                            log.debug('Package Line Warning', 'Package line ' + k + ' has no packagecartonnumber, skipping');
+                            continue;
+                        }
+                        
+                        // Extract sequence number from carton name (e.g., "SO201208-1" -> 1)
+                        var cartonSequence = extractCartonSequenceNumber(packageCartonNumber);
+                        
+                        if (cartonSequence === null) {
+                            log.debug('Package Line Warning', 'Could not extract sequence from package line ' + k + ' carton number: "' + packageCartonNumber + '"');
+                            continue;
+                        }
+                        
+                        // Check if this sequence has already been matched
+                        if (matchedSequences.indexOf(cartonSequence) !== -1) {
+                            log.debug('Package Line Warning', 'Sequence ' + cartonSequence + ' already matched, skipping duplicate');
+                            continue;
+                        }
+                        
+                        // Find matching tracking number from FedEx response
+                        var trackingNumber = sequenceToTrackingMap[cartonSequence];
+                        
+                        if (trackingNumber) {
                             packageUpdates.push({
                                 line: k,
-                                trackingNumber: assignedTracking,
-                                cartonName: correspondingCarton
+                                trackingNumber: trackingNumber,
+                                cartonNumber: packageCartonNumber,
+                                sequenceNumber: cartonSequence
                             });
-                            
-                            log.debug('Package Mapping', 'Package line ' + k + ' -> Carton ' + correspondingCarton + ' -> Tracking ' + assignedTracking);
+                            matchedSequences.push(cartonSequence);
+                            log.debug('Package Match Found', 'Package line ' + k + ' (carton "' + packageCartonNumber + '", sequence ' + cartonSequence + ') -> Tracking: ' + trackingNumber);
+                        } else {
+                            log.debug('Package Match Warning', 'No FedEx response found for sequence ' + cartonSequence + ' from package line ' + k + ' (carton "' + packageCartonNumber + '")');
                         }
+                        
+                    } catch (lineError) {
+                        log.error('Package Line Error', 'Error processing package line ' + k + ': ' + lineError.message);
                     }
+                }
+                
+                // If we didn't match any packages by carton number, fall back to sequential assignment
+                if (packageUpdates.length === 0) {
+                    log.debug('Multiple Tracking Warning', 'No packages matched by carton number, falling back to sequential assignment');
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                    return;
                 }
                 
                 // Apply the tracking number updates
@@ -781,17 +974,20 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         value: update.trackingNumber
                     });
                     
-                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' set to: ' + update.trackingNumber);
+                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' (carton "' + update.cartonNumber + '", sequence ' + update.sequenceNumber + ') set to: ' + update.trackingNumber);
                 }
                 
                 // Save the record with all tracking number updates
                 recordForUpdate.save();
-                log.debug('Multiple Tracking Success', 'Updated ' + packageUpdates.length + ' package tracking numbers using content-based matching');
+                log.debug('Multiple Tracking Success', 'Updated ' + packageUpdates.length + ' package tracking numbers using carton-number-based matching');
                 
             } catch (e) {
                 log.error('Multiple Tracking Error', 'Error updating package tracking numbers: ' + e.message + '\nStack: ' + e.stack);
                 // Fall back to sequential assignment on error
                 try {
+                    var transactionShipment = fedexResponse.output.transactionShipments[0];
+                    var pieceResponses = transactionShipment.pieceResponses;
+                    var masterTrackingNumber = transactionShipment.masterTrackingNumber;
                     updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
                 } catch (fallbackError) {
                     log.error('Fallback Tracking Error', 'Fallback sequential assignment also failed: ' + fallbackError.message);

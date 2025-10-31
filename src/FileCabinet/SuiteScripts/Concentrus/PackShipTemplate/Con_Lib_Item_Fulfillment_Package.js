@@ -38,6 +38,31 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/Library/Con_Lib_Record_
                     fieldId: 'packagetrackingnumber',
                     line: p
                 });
+
+                // Update the carton number name for process later
+                recordToEdit.selectLine({
+                    sublistId: 'package',
+                    line: p
+                });
+                
+                log.debug('BEFORE COMMITT packagecartonnumber_' + p, 'packagecartonnumber: ' + recordToEdit.getSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagecartonnumber',
+                    line: p
+                }));
+                recordToEdit.setCurrentSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagecartonnumber',
+                    value: originalDesc
+                });
+                recordToEdit.commitLine({sublistId: 'package'});
+                log.debug('AFTER COMMITT packagecartonnumber_' + p, 'packagecartonnumber: ' + recordToEdit.getSublistValue({
+                    sublistId: 'package',
+                    fieldId: 'packagecartonnumber',
+                    line: p
+                }));
+
+                
                 log.debug('ORIGINAL_PACKAGE_' + p, 'Desc: "' + originalDesc + '", Weight: ' + originalWeight + ', Tracking: ' + originalTracking);
             }
             let items = recordHelper.foreachSublist(recordToEdit, 'item', ['item', 'quantity', 'itemtype', 'itemname', 'kitmemberof'])
