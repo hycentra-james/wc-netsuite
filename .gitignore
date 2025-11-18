@@ -45,3 +45,4 @@ logs/
 *.lock
 package-lock.json 
 /src/FileCabinet/SuiteScripts/Hycentra/References
+project.json
