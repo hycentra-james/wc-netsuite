@@ -1823,6 +1823,66 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Get ship method mapping from custom record by ship method ID
+         * Core function that performs the actual lookup
+         *
+         * @param {string|number} shipMethodId The shipping method internal ID
+         * @returns {Object} Object with serviceType and packagingType properties
+         */
+        function getShipMethodMappingById(shipMethodId) {
+            // Default values
+            var mapping = {
+                serviceType: 'FEDEX_GROUND',
+                packagingType: 'YOUR_PACKAGING'
+            };
+
+            if (!shipMethodId) {
+                log.debug('Ship Method Mapping', 'No ship method ID provided, using defaults');
+                return mapping;
+            }
+
+            try {
+                var shipMethodCodeSearch = search.create({
+                    type: 'customrecord_hyc_shipmethod_code_map',
+                    filters: [
+                        ['custrecord_hyc_shipmethod_map_shipmethod', search.Operator.ANYOF, shipMethodId]
+                    ],
+                    columns: [
+                        'custrecord_hyc_shipmethod_map_code',
+                        'custrecord_hyc_shipmethod_pkg_type'
+                    ]
+                });
+
+                var searchResults = shipMethodCodeSearch.run().getRange({ start: 0, end: 1 });
+                
+                if (searchResults && searchResults.length > 0) {
+                    var result = searchResults[0];
+                    var shipCode = result.getValue('custrecord_hyc_shipmethod_map_code') || '';
+                    var packagingType = result.getValue('custrecord_hyc_shipmethod_pkg_type') || '';
+                    
+                    if (shipCode) {
+                        mapping.serviceType = shipCode;
+                        log.debug('Ship Method Mapping', 'Found service type from mapping: ' + shipCode);
+                    }
+                    
+                    if (packagingType) {
+                        mapping.packagingType = packagingType;
+                        log.debug('Ship Method Mapping', 'Found packaging type from mapping: ' + packagingType);
+                    }
+                } else {
+                    log.debug('Ship Method Mapping', 'No mapping found for ship method ID: ' + shipMethodId + ', using defaults');
+                }
+            } catch (e) {
+                log.error({
+                    title: 'Ship Method Mapping Error',
+                    details: 'Failed to lookup ship method mapping: ' + e.message + ', using defaults'
+                });
+            }
+
+            return mapping;
+        }
+
+        /**
          * Get ship method mapping (service type and packaging type) with caching
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
@@ -1834,53 +1894,19 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
             log.debug('Ship Method Mapping', 'shipMethod ID = ' + shipMethodId + ', Text = ' + shipMethodText);
 
+            return getShipMethodMappingById(shipMethodId);
+        }
 
-            // Default values
-            var mapping = {
-                serviceType: 'FEDEX_GROUND',
-                packagingType: 'YOUR_PACKAGING'
-            };
-
-            // Lookup ship code and packaging type from custom record mapping
-            if (shipMethodId) {
-                try {
-                    var shipMethodCodeSearch = search.create({
-                        type: 'customrecord_hyc_shipmethod_code_map',
-                        filters: [
-                            ['custrecord_hyc_shipmethod_map_shipmethod', search.Operator.ANYOF, shipMethodId]
-                        ],
-                        columns: [
-                            'custrecord_hyc_shipmethod_map_code',
-                            'custrecord_hyc_shipmethod_pkg_type'
-                        ]
-                    });
-
-                    var searchResults = shipMethodCodeSearch.run().getRange({ start: 0, end: 1 });
-                    
-                    if (searchResults && searchResults.length > 0) {
-                        var result = searchResults[0];
-                        var shipCode = result.getValue('custrecord_hyc_shipmethod_map_code') || '';
-                        var packagingType = result.getValue('custrecord_hyc_shipmethod_pkg_type') || '';
-                        
-                        if (shipCode) {
-                            mapping.serviceType = shipCode;
-                            log.debug('Ship Method Mapping', 'Found service type from mapping: ' + shipCode);
-                        }
-                        
-                        if (packagingType) {
-                            mapping.packagingType = packagingType;
-                            log.debug('Ship Method Mapping', 'Found packaging type from mapping: ' + packagingType);
-                        }
-                    } else {
-                        log.debug('Ship Method Mapping', 'No mapping found for ship method ID: ' + shipMethodId + ', using defaults');
-                    }
-                } catch (e) {
-                    log.error('Ship Method Mapping Error', 'Failed to lookup ship method mapping: ' + e.message + ', using defaults');
-                }
-            }
-
-
-            return mapping;
+        /**
+         * Get FedEx service code from shipping method ID
+         *
+         * @param {string|number} shipMethodId The shipping method internal ID
+         * @returns {string} FedEx service code (e.g., 'FEDEX_GROUND')
+         */
+        function getFedExServiceCode(shipMethodId) {
+            var mapping = getShipMethodMappingById(shipMethodId);
+            log.debug('FedEx Service Code', 'Service code for ship method ' + shipMethodId + ': ' + mapping.serviceType);
+            return mapping.serviceType;
         }
 
         /**
@@ -2480,7 +2506,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             buildPackageLineItems: buildPackageLineItems,
             getServiceType: getServiceType,
             getPackagingType: getPackagingType,
+            getFedExServiceCode: getFedExServiceCode,
             getCurrentDateString: getCurrentDateString,
+            getShippingLabelMapping: getShippingLabelMapping,
+            validatePhoneNumber: validatePhoneNumber,
             createShipment: createShipment,
             printFedExLabels: printFedExLabels
         };
