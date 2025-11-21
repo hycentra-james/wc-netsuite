@@ -5,8 +5,8 @@
  * @NScriptType UserEventScript
  * @NModuleScope SameAccount
  */
-define(['N/record', 'N/log', 'N/error', './fedexRateQuote'],
-    function (record, log, error, fedexRateQuote) {
+define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote'],
+    function (record, search, log, error, fedexRateQuote) {
         
         // FedEx Shipping Method IDs that should trigger rate quote
         const FEDEX_SHIPPING_METHOD_IDS = [
@@ -23,7 +23,6 @@ define(['N/record', 'N/log', 'N/error', './fedexRateQuote'],
         function beforeSubmit(context) {
             try {
                 var newRecord = context.newRecord;
-                var oldRecord = context.oldRecord;
                 
                 // Only process Sales Orders
                 if (newRecord.type !== 'salesorder') {
@@ -39,24 +38,52 @@ define(['N/record', 'N/log', 'N/error', './fedexRateQuote'],
                 
                 // Check if shipping method changed
                 var newShipMethodId = newRecord.getValue({ fieldId: 'shipmethod' });
-                var oldShipMethodId = oldRecord ? oldRecord.getValue({ fieldId: 'shipmethod' }) : null;
+                var newActualShippingCost = newRecord.getValue({ fieldId: 'custbody_fmt_actual_shipping_cost' }) || 0;
                 
-                // If ship method didn't change, skip
-                if (newShipMethodId === oldShipMethodId) {
-                    log.debug('FedEx Rate Quote', 'Shipping method did not change, skipping');
-                    // return;
-                }
-                
-                // Check if new shipping method is in FedEx list
+                // Condition 1: Check if new shipping method is in FedEx list
                 if (!newShipMethodId || FEDEX_SHIPPING_METHOD_IDS.indexOf(parseInt(newShipMethodId)) === -1) {
                     log.debug('FedEx Rate Quote', 'Shipping method ' + newShipMethodId + ' is not a FedEx method, skipping');
                     return;
                 }
                 
+                // Condition 2: Check if Actual Shipping Cost is already set (should be 0)
+                if (newActualShippingCost > 0) {
+                    log.debug('FedEx Rate Quote', 'Actual Shipping Cost is already set (' + newActualShippingCost + '), skipping');
+                    return;
+                }
+                
+                // Condition 3: Check if customer has a specific FedEx account (mapping record)
+                var customerId = newRecord.getValue({ fieldId: 'entity' });
+                var mappingRecord = null;
+                
+                if (customerId && newShipMethodId) {
+                    try {
+                        var mappingSearch = search.create({
+                            type: 'customrecord_hyc_shipping_label_mapping',
+                            filters: [
+                                ['custrecord_hyc_ship_lbl_map_customer', search.Operator.ANYOF, customerId],
+                                'AND',
+                                ['custrecord_hyc_ship_lbl_map_ship_method', search.Operator.ANYOF, newShipMethodId]
+                            ],
+                            columns: ['custrecord_hyc_ship_lbl_ship_from']
+                        });
+                        
+                        var searchResults = mappingSearch.run().getRange({ start: 0, end: 1 });
+                        if (searchResults && searchResults.length > 0) {
+                            mappingRecord = searchResults[0];
+                            log.debug('FedEx Rate Quote', 'Customer ' + customerId + ' has specific FedEx account mapping, skipping rate quote');
+                            return;
+                        }
+                    } catch (e) {
+                        log.debug('Mapping Lookup Warning', 'Could not check mapping record: ' + e.message);
+                    }
+                }
+                
+                
                 log.debug('FedEx Rate Quote', 'Processing rate quote for Sales Order: ' + newRecord.id + ', Ship Method: ' + newShipMethodId);
                 
                 // Get rate quote (returns object with rate and apiResponse)
-                var rateQuoteResult = fedexRateQuote.getRateQuote(newRecord, newShipMethodId);
+                var rateQuoteResult = fedexRateQuote.getRateQuote(newRecord);
                 var rate = rateQuoteResult.rate;
                 var apiResponse = rateQuoteResult.apiResponse;
                 
@@ -83,7 +110,7 @@ define(['N/record', 'N/log', 'N/error', './fedexRateQuote'],
                 if (rate && rate > 0) {
                     // Update shipping cost field
                     newRecord.setValue({
-                        fieldId: 'shippingcost',
+                        fieldId: 'custbody_fmt_actual_shipping_cost',
                         value: rate
                     });
                     

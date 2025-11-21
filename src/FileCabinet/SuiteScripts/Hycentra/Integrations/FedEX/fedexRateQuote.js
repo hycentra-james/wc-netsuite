@@ -12,18 +12,19 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexHelper', './shipping
          * Get FedEx rate quote for a Sales Order
          *
          * @param {record} salesOrderRecord The Sales Order record
-         * @param {string|number} shipMethodId The shipping method internal ID
          * @returns {Object} { rate: number, apiResponse: Object } Shipping rate amount and API response
          */
-        function getRateQuote(salesOrderRecord, shipMethodId) {
+        function getRateQuote(salesOrderRecord) {
             try {
+                var shipMethodId = salesOrderRecord.getValue({ fieldId: 'shipmethod' });
+
                 log.debug('FedEx Rate Quote', 'Getting rate quote for Sales Order: ' + salesOrderRecord.id + ', Ship Method: ' + shipMethodId);
-                
+
                 // Get FedEx service code from mapping
                 var fedexServiceCode = fedexHelper.getFedExServiceCode(shipMethodId);
                 log.debug('FedEx Rate Quote', 'Using service code: ' + fedexServiceCode);
                 
-                // Build rate quote payload
+                // Build rate quote payload (pass mappingRecord to avoid reloading)
                 var payload = buildRateQuotePayload(salesOrderRecord, fedexServiceCode);
                 
                 // Get authentication token and API URL
@@ -93,49 +94,13 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexHelper', './shipping
                 var tokenRecord = fedexHelper.getTokenRecord();
                 var accountNumber = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_account_number' });
                 
-                // Get shipping address mapping (for shipper info)
-                // Try to get mapping from Sales Order customer and ship method, otherwise use fallback
-                var mappingRecord = null;
-                try {
-                    var customerId = salesOrderRecord.getValue({ fieldId: 'entity' });
-                    var shipMethodId = salesOrderRecord.getValue({ fieldId: 'shipmethod' });
-                    
-                    if (customerId && shipMethodId) {
-                        var mappingSearch = search.create({
-                            type: 'customrecord_hyc_shipping_label_mapping',
-                            filters: [
-                                ['custrecord_hyc_ship_lbl_map_customer', search.Operator.ANYOF, customerId],
-                                'AND',
-                                ['custrecord_hyc_ship_lbl_map_ship_method', search.Operator.ANYOF, shipMethodId]
-                            ],
-                            columns: ['custrecord_hyc_ship_lbl_ship_from']
-                        });
-                        
-                        var searchResults = mappingSearch.run().getRange({ start: 0, end: 1 });
-                        if (searchResults && searchResults.length > 0) {
-                            mappingRecord = searchResults[0];
-                        }
-                    }
-                } catch (e) {
-                    log.debug('Mapping Lookup Warning', 'Could not get mapping record: ' + e.message);
-                }
+                // Use provided mappingRecord, or load fallback if not provided
+                // Load the Water Creation shipping label mapping record
+                var mappingRecord = record.load({
+                    type: 'customrecord_hyc_shipping_label_mapping',
+                    id: 10 // WC_FEDEX_MAPPING_RECORD_ID
+                });
                 
-                // If no mapping found, load fallback record
-                if (!mappingRecord) {
-                    try {
-                        var fallbackRecord = record.load({
-                            type: 'customrecord_hyc_shipping_label_mapping',
-                            id: 10 // WC_FEDEX_MAPPING_RECORD_ID
-                        });
-                        mappingRecord = {
-                            getValue: function(fieldId) {
-                                return fallbackRecord.getValue({ fieldId: fieldId });
-                            }
-                        };
-                    } catch (e) {
-                        log.debug('Fallback Mapping Warning', 'Could not load fallback mapping: ' + e.message);
-                    }
-                }
                 
                 // Calculate weight and dimensions
                 var weightDimensionData = shippingWeightDimension.calculateSalesOrderWeightAndDimensions(salesOrderRecord);
