@@ -58,8 +58,9 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
                     
                     log.debug('Weight/Dimension Item', 'Processing line ' + i + ': Item=' + itemId + ', Type=' + itemType + ', Qty=' + quantity);
                     
-                    // Get weight/dimensions for this line item
-                    var linePackages = getBoxWeightAndDimensions(itemId, itemType, quantity, 0);
+                    // Get weight/dimensions for this line item (initialize visitedKits array for recursion tracking)
+                    var visitedKits = [];
+                    var linePackages = getBoxWeightAndDimensions(itemId, itemType, quantity, 0, visitedKits);
                     
                     // Multiply packages by quantity
                     for (var q = 0; q < quantity; q++) {
@@ -112,9 +113,15 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
          * @param {string} itemType The item type ('InvtPart' or 'Kit')
          * @param {number} quantity The quantity of the item
          * @param {number} depth Current recursion depth (for kits)
+         * @param {Array} visitedKits Array of kit IDs already visited in current recursion path (to prevent infinite loops)
          * @returns {Object} { packages: [{weight, dimensions}], totalWeight, totalPackageCount }
          */
-        function getBoxWeightAndDimensions(itemId, itemType, quantity, depth) {
+        function getBoxWeightAndDimensions(itemId, itemType, quantity, depth, visitedKits) {
+            // Initialize visitedKits if not provided
+            if (!visitedKits) {
+                visitedKits = [];
+            }
+            
             if (depth > MAX_RECURSION_DEPTH) {
                 throw error.create({
                     name: 'KIT_RECURSION_DEPTH_EXCEEDED',
@@ -125,7 +132,7 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
             if (itemType === 'InvtPart' || itemType === 'Inventory Item') {
                 return getItemWeightAndDimensions(itemId, quantity);
             } else if (itemType === 'Kit') {
-                return getKitWeightAndDimensions(itemId, quantity, depth);
+                return getKitWeightAndDimensions(itemId, quantity, depth, visitedKits);
             } else {
                 log.debug('Weight/Dimension Warning', 'Unknown item type: ' + itemType + ' for item ' + itemId);
                 // Return default package
@@ -208,11 +215,44 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
          * @param {string|number} kitId The kit item internal ID
          * @param {number} quantity The quantity of kits
          * @param {number} depth Current recursion depth
+         * @param {Array} visitedKits Array of kit IDs already visited in current recursion path (to prevent infinite loops)
          * @returns {Object} { packages: [{weight, dimensions}], totalWeight, totalPackageCount }
          */
-        function getKitWeightAndDimensions(kitId, quantity, depth) {
+        function getKitWeightAndDimensions(kitId, quantity, depth, visitedKits) {
             try {
+                // Initialize visitedKits if not provided
+                if (!visitedKits) {
+                    visitedKits = [];
+                }
+                
                 log.debug('Kit Weight/Dimension', 'Getting weight/dimensions for kit: ' + kitId + ' (depth: ' + depth + ')');
+                
+                var kitIdStr = String(kitId);
+                
+                // Check if this kit is already in the visited path (prevent infinite recursion)
+                var isAlreadyVisited = false;
+                for (var v = 0; v < visitedKits.length; v++) {
+                    if (visitedKits[v] === kitIdStr) {
+                        isAlreadyVisited = true;
+                        break;
+                    }
+                }
+                
+                if (isAlreadyVisited) {
+                    log.warning({
+                        title: 'Kit Already Visited',
+                        details: 'Kit item ' + kitId + ' is already in the recursion path. Skipping to prevent infinite recursion.'
+                    });
+                    // Return empty packages to avoid infinite recursion
+                    return {
+                        packages: [],
+                        totalWeight: 0,
+                        totalPackageCount: 0
+                    };
+                }
+                
+                // Add current kit to visited list before processing
+                visitedKits.push(kitIdStr);
                 
                 // Load kit record
                 var kitRecord = record.load({
@@ -244,10 +284,44 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
                         });
                     }
                     
+                    var cartonSkuIdStr = String(cartonSkuId);
+                    
+                    // Check if carton SKU refers to the kit itself
+                    if (cartonSkuIdStr === kitIdStr) {
+                        // This is a self-reference - use the kit's own weight/dimensions directly
+                        // instead of recursing, to avoid infinite loop while still calculating it once
+                        log.debug('Kit Weight/Dimension', 'Kit ' + kitId + ' box ' + boxNum + ' references itself. Using kit\'s own weight/dimensions directly.');
+                        
+                        // Get the kit's weight and dimensions directly (as if it were an inventory item)
+                        var kitWeight = parseFloat(kitRecord.getValue({ fieldId: 'custitem_fmt_shipping_weight' })) || 1;
+                        var kitWidth = parseFloat(kitRecord.getValue({ fieldId: 'custitem_fmt_shipping_width' })) || 1;
+                        var kitLength = parseFloat(kitRecord.getValue({ fieldId: 'custitem_fmt_shipping_length' })) || 1;
+                        var kitHeight = parseFloat(kitRecord.getValue({ fieldId: 'custitem_fmt_shipping_height' })) || 1;
+                        
+                        // Apply minimums
+                        if (kitWeight < 1) kitWeight = 1;
+                        if (kitWidth < 1) kitWidth = 1;
+                        if (kitLength < 1) kitLength = 1;
+                        if (kitHeight < 1) kitHeight = 1;
+                        
+                        // Add as a package
+                        allPackages.push({
+                            weight: kitWeight,
+                            dimensions: {
+                                length: kitLength,
+                                width: kitWidth,
+                                height: kitHeight
+                            }
+                        });
+                        
+                        log.debug('Kit Weight/Dimension', 'Added self-reference box ' + boxNum + ': Weight=' + kitWeight + ' lbs, Dimensions=' + kitLength + 'x' + kitWidth + 'x' + kitHeight);
+                        continue; // Skip recursive processing for self-reference
+                    }
+                    
                     log.debug('Kit Weight/Dimension', 'Processing box ' + boxNum + ' with carton SKU: ' + cartonSkuId);
                     
-                    // Get weight/dimensions for this carton SKU (recursive)
-                    var cartonPackages = getCartonSkuWeightAndDimensions(cartonSkuId, depth + 1);
+                    // Get weight/dimensions for this carton SKU (recursive, pass visitedKits array)
+                    var cartonPackages = getCartonSkuWeightAndDimensions(cartonSkuId, depth + 1, visitedKits);
                     
                     // Add all packages from this carton SKU
                     for (var p = 0; p < cartonPackages.packages.length; p++) {
@@ -256,6 +330,12 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
                             dimensions: cartonPackages.packages[p].dimensions
                         });
                     }
+                }
+                
+                // Remove current kit from visited list before returning (for proper recursion tracking)
+                var removeIndex = visitedKits.indexOf(kitIdStr);
+                if (removeIndex > -1) {
+                    visitedKits.splice(removeIndex, 1);
                 }
                 
                 // Calculate totals
@@ -286,17 +366,23 @@ define(['N/record', 'N/search', 'N/error', 'N/log'],
          *
          * @param {string|number} cartonSkuId The carton SKU internal ID
          * @param {number} depth Current recursion depth
+         * @param {Array} visitedKits Array of kit IDs already visited in current recursion path (to prevent infinite loops)
          * @returns {Object} { packages: [{weight, dimensions}], totalWeight, totalPackageCount }
          */
-        function getCartonSkuWeightAndDimensions(cartonSkuId, depth) {
+        function getCartonSkuWeightAndDimensions(cartonSkuId, depth, visitedKits) {
             try {
+                // Initialize visitedKits if not provided
+                if (!visitedKits) {
+                    visitedKits = [];
+                }
+                
                 log.debug('Carton SKU Weight/Dimension', 'Processing carton SKU: ' + cartonSkuId + ' (depth: ' + depth + ')');
                 
                 // Determine item type
                 var itemType = getItemType(cartonSkuId);
                 
-                // Get weight/dimensions (recursive if it's a kit)
-                return getBoxWeightAndDimensions(cartonSkuId, itemType, 1, depth);
+                // Get weight/dimensions (recursive if it's a kit, pass visitedKits array)
+                return getBoxWeightAndDimensions(cartonSkuId, itemType, 1, depth, visitedKits);
                 
             } catch (e) {
                 log.error({
