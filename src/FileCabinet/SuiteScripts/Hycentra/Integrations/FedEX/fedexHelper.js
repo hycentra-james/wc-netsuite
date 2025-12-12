@@ -96,15 +96,25 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          */
         function validateToken(tokenRecord) {
             try {
+                // First check if access_token exists and is not empty
+                var accessToken = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' });
                 var expirationValue = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_expiration' });
 
-                // Check if expiration value exists
+                // If access_token is missing or empty, refresh the token
+                if (!accessToken || accessToken === '') {
+                    log.debug('DEBUG', 'No access token found, refreshing token');
+                    tokenRecord = refreshToken(tokenRecord);
+                    return tokenRecord;
+                }
+
+                // If expiration value is missing, refresh the token
                 if (!expirationValue) {
                     log.debug('DEBUG', 'No expiration date found, refreshing token');
                     tokenRecord = refreshToken(tokenRecord);
                     return tokenRecord;
                 }
 
+                // Parse expiration date and check if token is still valid
                 var expirationDateObj = format.parse({
                     value: expirationValue,
                     type: format.Type.DATETIMETZ
@@ -126,7 +136,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     title: 'ERROR',
                     details: 'Error validating FedEx token: ' + e.message
                 });
-                // If no expiration date exists or parsing fails, refresh the token
+                // If validation fails, refresh the token
                 log.debug('DEBUG', 'Token validation failed, refreshing token');
                 tokenRecord = refreshToken(tokenRecord);
             }
@@ -2154,32 +2164,18 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     });
                 }
 
-                // Clear any existing token to force fresh authentication
-                log.debug('DEBUG', 'Clearing existing token and forcing refresh...');
-                tokenRecord.setValue({ fieldId: 'custrecord_hyc_fedex_access_token', value: '' });
-                tokenRecord.setValue({ fieldId: 'custrecord_hyc_fedex_expiration', value: '' });
-                tokenRecord.save();
-
-                // Force token refresh to ensure new credentials are used
-                log.debug('DEBUG', 'Refreshing token with new credentials...');
-                var refreshResult = refreshToken(tokenRecord);
-
-                // Get the actual bearer token from the refreshed record
-                var bearerToken = '';
-                if (refreshResult) {
-                    // refreshToken returns the updated record, so get token from it
-                    bearerToken = refreshResult.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' }) || '';
-                    log.debug('DEBUG', 'Token refresh result: Success - Token: ' + (bearerToken ? bearerToken.substring(0, 20) + '...' : 'No token found in record'));
-                } else {
-                    log.debug('DEBUG', 'Token refresh result: Failed - no record returned');
-                }
-
+                // Get bearer token from validated token record
+                // getTokenRecord() already calls validateToken() which will refresh if needed
+                var bearerToken = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' }) || '';
+                
                 if (!bearerToken) {
                     throw error.create({
                         name: 'TOKEN_REFRESH_FAILED',
-                        message: 'Failed to obtain bearer token after refresh'
+                        message: 'Failed to obtain bearer token. Token validation should have refreshed the token, but no token was found.'
                     });
                 }
+                
+                log.debug('DEBUG', 'Using bearer token: ' + bearerToken.substring(0, 20) + '...');
 
                 var apiUrl = getApiUrl();
                 apiUrl += 'ship/v1/shipments';
