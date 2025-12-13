@@ -509,28 +509,21 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     return;
                 }
                 
-                // Match package lines to FedEx responses based on packagecartonnumber sequence
-                var packageUpdates = [];
-                var matchedSequences = [];
-                
-                // For each package line, extract sequence number from packagecartonnumber and match with FedEx sequence
+                // Step 1: Collect all actual carton numbers from package sublist
+                var cartonInfo = [];
                 for (var k = 0; k < packageCount; k++) {
                     try {
-                        // Get the carton number from packagecartonnumber field
                         var packageCartonNumber = recordForUpdate.getSublistValue({
                             sublistId: 'package',
                             fieldId: 'packagecartonnumber',
                             line: k
                         });
                         
-                        log.debug('Package Line Info', 'Package line ' + k + ', packagecartonnumber: "' + packageCartonNumber + '"');
-                        
                         if (!packageCartonNumber) {
                             log.debug('Package Line Warning', 'Package line ' + k + ' has no packagecartonnumber, skipping');
                             continue;
                         }
                         
-                        // Extract sequence number from carton name (e.g., "SO201208-1" -> 1)
                         var cartonSequence = extractCartonSequenceNumber(packageCartonNumber);
                         
                         if (cartonSequence === null) {
@@ -538,30 +531,51 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             continue;
                         }
                         
-                        // Check if this sequence has already been matched
-                        if (matchedSequences.indexOf(cartonSequence) !== -1) {
-                            log.debug('Package Line Warning', 'Sequence ' + cartonSequence + ' already matched, skipping duplicate');
-                            continue;
-                        }
+                        cartonInfo.push({
+                            line: k,
+                            cartonNumber: packageCartonNumber,
+                            sequenceNumber: cartonSequence
+                        });
                         
-                        // Find matching tracking number from FedEx response
-                        var trackingNumber = sequenceToTrackingMap[cartonSequence];
-                        
-                        if (trackingNumber) {
-                            packageUpdates.push({
-                                line: k,
-                                trackingNumber: trackingNumber,
-                                cartonNumber: packageCartonNumber,
-                                sequenceNumber: cartonSequence
-                            });
-                            matchedSequences.push(cartonSequence);
-                            log.debug('Package Match Found', 'Package line ' + k + ' (carton "' + packageCartonNumber + '", sequence ' + cartonSequence + ') -> Tracking: ' + trackingNumber);
-                        } else {
-                            log.debug('Package Match Warning', 'No FedEx response found for sequence ' + cartonSequence + ' from package line ' + k + ' (carton "' + packageCartonNumber + '")');
-                        }
+                        log.debug('Carton Info Collected', 'Package line ' + k + ', carton: "' + packageCartonNumber + '", sequence: ' + cartonSequence);
                         
                     } catch (lineError) {
                         log.error('Package Line Error', 'Error processing package line ' + k + ': ' + lineError.message);
+                    }
+                }
+                
+                if (cartonInfo.length === 0) {
+                    log.debug('Multiple Tracking Warning', 'No valid carton numbers found, falling back to sequential assignment');
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                    return;
+                }
+                
+                // Step 2: Sort cartons by sequence number to get consistent ordering
+                cartonInfo.sort(function(a, b) {
+                    return a.sequenceNumber - b.sequenceNumber;
+                });
+                
+                log.debug('Carton Sort Result', 'Sorted ' + cartonInfo.length + ' cartons: ' + JSON.stringify(cartonInfo.map(function(c) { return c.cartonNumber + '(seq:' + c.sequenceNumber + ')'; })));
+                
+                // Step 3: Map FedEx sequences (1, 2, 3...) to sorted carton positions (first, second, third...)
+                var packageUpdates = [];
+                
+                for (var m = 0; m < cartonInfo.length && m < pieceResponses.length; m++) {
+                    var carton = cartonInfo[m];
+                    var fedExSequence = m + 1; // FedEx sequences start at 1
+                    var trackingNumber = sequenceToTrackingMap[fedExSequence];
+                    
+                    if (trackingNumber) {
+                        packageUpdates.push({
+                            line: carton.line,
+                            trackingNumber: trackingNumber,
+                            cartonNumber: carton.cartonNumber,
+                            sequenceNumber: carton.sequenceNumber,
+                            fedExSequence: fedExSequence
+                        });
+                        log.debug('Package Match Found', 'FedEx Sequence ' + fedExSequence + ' -> Package line ' + carton.line + ' (carton "' + carton.cartonNumber + '", carton seq ' + carton.sequenceNumber + ') -> Tracking: ' + trackingNumber);
+                    } else {
+                        log.debug('Package Match Warning', 'No FedEx response found for FedEx sequence ' + fedExSequence + ' (carton "' + carton.cartonNumber + '")');
                     }
                 }
                 
@@ -582,7 +596,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         value: update.trackingNumber
                     });
                     
-                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' (carton "' + update.cartonNumber + '", sequence ' + update.sequenceNumber + ') set to: ' + update.trackingNumber);
+                    log.debug('Tracking Update Applied', 'Package line ' + update.line + ' (carton "' + update.cartonNumber + '", carton seq ' + update.sequenceNumber + ', FedEx seq ' + update.fedExSequence + ') set to: ' + update.trackingNumber);
                 }
                 
                 // Save the record with all tracking number updates
