@@ -1381,7 +1381,18 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Step 4: Create package for each carton
                 for (var cartonId in cartonGroups) {
                     var cartonData = calculateCartonData(cartonGroups[cartonId]);
-                    var packageItem = buildCartonPackage(cartonData.weight, cartonId, references, cartonData.dimensions);
+
+                    // Build carton-specific references by cloning base references and adding DEPARTMENT_NUMBER
+                    var cartonReferences = references.slice(); // Clone the array
+                    var cartonItemIds = getCartonItemIds(cartonGroups[cartonId]);
+                    if (cartonItemIds) {
+                        cartonReferences.push({
+                            "customerReferenceType": "DEPARTMENT_NUMBER",
+                            "value": cartonItemIds
+                        });
+                    }
+
+                    var packageItem = buildCartonPackage(cartonData.weight, cartonId, cartonReferences, cartonData.dimensions);
                     packageLineItems.push(packageItem);
                 }
                 
@@ -1637,123 +1648,27 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
-         * Calculate carton dimensions by finding the item with largest volume
-         *
-         * @param {Array} packshipRecords Array of PackShip records for this carton
-         * @returns {Object} Dimensions object with length, width, height in inches
-         */
-        function calculateCartonDimensions(packshipRecords) {
-            log.debug('Carton Dimensions Calculation', 'Calculating dimensions for ' + packshipRecords.length + ' items');
-            
-            var largestVolume = 0;
-            var bestDimensions = { length: 0, width: 0, height: 0 };
-            
-            for (var i = 0; i < packshipRecords.length; i++) {
-                var packshipRecord = packshipRecords[i];
-                
-                if (!packshipRecord.item) {
-                    log.debug('Dimension Warning', 'PackShip record ID ' + packshipRecord.id + ' has no item, skipping');
-                    continue;
-                }
-                
-                try {
-                    log.debug('Dimension Debug', 'Loading item ID: ' + packshipRecord.item + ' for dimensions');
-                    
-                    // Load the item record to get dimensions
-                    var itemRecord;
-                    var itemTypes = ['inventoryitem', 'kititem'];
-                    var loadSuccess = false;
-                    
-                    for (var t = 0; t < itemTypes.length; t++) {
-                        try {
-                            itemRecord = record.load({
-                                type: itemTypes[t],
-                                id: packshipRecord.item
-                            });
-                            loadSuccess = true;
-                            log.debug('Dimension Debug', 'Successfully loaded item ' + packshipRecord.item + ' as ' + itemTypes[t]);
-                            break;
-                        } catch (typeError) {
-                            log.debug('Dimension Debug', 'Failed to load item ' + packshipRecord.item + ' as ' + itemTypes[t]);
-                        }
-                    }
-                    
-                    if (!loadSuccess) {
-                        log.debug('Dimension Warning', 'Could not load item ' + packshipRecord.item + ' with any item type, using 0x0x0');
-                        continue;
-                    }
-                    
-                    // Get dimension fields
-                    var itemWidth = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_width' });
-                    var itemLength = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_length' });
-                    var itemHeight = itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_height' });
-                    
-                    log.debug('Dimension Debug', 'Item ' + packshipRecord.item + ' raw dimensions: W=' + itemWidth + ', L=' + itemLength + ', H=' + itemHeight);
-                    
-                    // Parse and validate dimensions
-                    var parsedWidth = parseFloat(itemWidth) || 0;
-                    var parsedLength = parseFloat(itemLength) || 0;
-                    var parsedHeight = parseFloat(itemHeight) || 0;
-                    
-                    log.debug('Dimension Debug', 'Item ' + packshipRecord.item + ' parsed dimensions: W=' + parsedWidth + ', L=' + parsedLength + ', H=' + parsedHeight);
-                    
-                    // Calculate volume
-                    var volume = parsedWidth * parsedLength * parsedHeight;
-                    
-                    log.debug('Dimension Calculation', 'Item ' + packshipRecord.item + ': volume=' + volume + ' cubic inches');
-                    
-                    // Check if this is the largest volume so far
-                    if (volume > largestVolume) {
-                        largestVolume = volume;
-                        bestDimensions = {
-                            length: parsedLength,
-                            width: parsedWidth,
-                            height: parsedHeight
-                        };
-                        log.debug('Dimension Update', 'New largest volume item: ' + packshipRecord.item + ' with volume ' + volume + ' cubic inches');
-                    }
-                    
-                } catch (itemError) {
-                    log.debug('Dimension Item Error', 'Failed to get dimensions for item ' + packshipRecord.item + ': ' + itemError.message);
-                }
-            }
-            
-            log.debug('Dimension Final', 'Final carton dimensions: ' + bestDimensions.length + 'x' + bestDimensions.width + 'x' + bestDimensions.height + ' inches (volume: ' + largestVolume + ')');
-            
-            return bestDimensions;
-        }
-
-        /**
-         * Calculate total weight for a carton based on items and their weights
+         * Get comma-separated item IDs for a carton (for DEPARTMENT_NUMBER reference)
          *
          * @param {Array} cartonRecords Array of PackShip records for this carton
-         * @returns {number} Total weight in pounds
+         * @returns {string} Comma-separated item IDs (max 30 characters)
          */
-        function calculateCartonWeight(cartonRecords) {
-            var totalWeight = 0;
+        function getCartonItemIds(cartonRecords) {
+            var itemIds = [];
 
             for (var i = 0; i < cartonRecords.length; i++) {
                 var packshipRecord = cartonRecords[i];
-                
-                if (!packshipRecord.item) {
-                    log.debug('PackShip Weight Warning', 'PackShip record ID ' + packshipRecord.id + ' has no item field, skipping weight calculation');
-                    continue;
-                }
 
-                if (!packshipRecord.quantity || packshipRecord.quantity <= 0) {
-                    log.debug('PackShip Weight Warning', 'PackShip record ID ' + packshipRecord.id + ' has invalid quantity: ' + packshipRecord.quantity + ', skipping weight calculation');
+                if (!packshipRecord.item) {
                     continue;
                 }
 
                 try {
-                    log.debug('PackShip Weight Debug', 'Attempting to load item ID: ' + packshipRecord.item + ' for PackShip record ' + packshipRecord.id);
-                    
-                    // Load the item record to get shipping weight
-                    // Try different item types since 'item' is not valid
+                    // Load the item record to get itemid
                     var itemRecord;
                     var itemTypes = ['inventoryitem', 'kititem'];
                     var loadSuccess = false;
-                    
+
                     for (var t = 0; t < itemTypes.length; t++) {
                         try {
                             itemRecord = record.load({
@@ -1761,57 +1676,31 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 id: packshipRecord.item
                             });
                             loadSuccess = true;
-                            log.debug('PackShip Weight Debug', 'Successfully loaded item record for ID: ' + packshipRecord.item + ' using type: ' + itemTypes[t]);
                             break;
                         } catch (typeError) {
                             // Continue to next type
-                            log.debug('PackShip Weight Debug', 'Failed to load item ' + packshipRecord.item + ' as ' + itemTypes[t] + ': ' + typeError.message);
                         }
                     }
-                    
-                    if (!loadSuccess) {
-                        throw new Error('Could not load item with any supported item type');
+
+                    if (loadSuccess) {
+                        var itemId = itemRecord.getValue({ fieldId: 'itemid' });
+                        if (itemId && itemIds.indexOf(itemId) === -1) {
+                            itemIds.push(itemId);
+                        }
                     }
-
-                    var itemWeight = itemRecord.getValue({ fieldId: 'weight' });
-                    
-                    log.debug('PackShip Weight Debug', 'Raw weight value from weight: "' + itemWeight + '" (type: ' + typeof itemWeight + ')');
-                    
-                    // Try to parse the weight value
-                    var parsedWeight = parseFloat(itemWeight);
-                    log.debug('PackShip Weight Debug', 'Parsed weight: ' + parsedWeight + ' (isNaN: ' + isNaN(parsedWeight) + ')');
-                    
-                    if (!itemWeight || itemWeight <= 0 || isNaN(parsedWeight)) {
-                        // We are not going to use the default item Weight
-                        // log.debug('PackShip Weight Warning', 'Item ID ' + packshipRecord.item + ' has invalid shipping weight: "' + itemWeight + '", using default weight of 1 lb');
-                        //itemWeight = 1;
-                    } else {
-                        itemWeight = parsedWeight;
-                        log.debug('PackShip Weight Success', 'Item ID ' + packshipRecord.item + ' has valid shipping weight: ' + itemWeight + ' lbs');
-                    }
-
-                    var itemTotalWeight = itemWeight * packshipRecord.quantity;
-                    totalWeight += itemTotalWeight;
-
-                    log.debug('PackShip Weight Calculation', 'Item ' + packshipRecord.item + ': weight=' + itemWeight + ' lbs, qty=' + packshipRecord.quantity + ', total=' + itemTotalWeight + ' lbs');
-
                 } catch (e) {
-                    log.error('PackShip Item Load Error', 'Failed to load item ' + packshipRecord.item + ': ' + e.message + '\nStack: ' + e.stack + '\nUsing default weight of 1 lb');
-                    // totalWeight += (1 * packshipRecord.quantity); // Default weight fallback
-                    log.debug('PackShip Weight Fallback', 'Added fallback weight for item ' + packshipRecord.item + ': ' + (1 * packshipRecord.quantity) + ' lbs');
+                    log.debug('getCartonItemIds Error', 'Failed to get itemid for item ' + packshipRecord.item + ': ' + e.message);
                 }
             }
 
-            log.debug('PackShip Weight Summary', 'Calculated total weight for carton: ' + totalWeight + ' lbs (before minimum check)');
-
-            // Minimum weight of 1 lb per carton
-            if (totalWeight < 1) {
-                totalWeight = 1;
-                log.debug('PackShip Weight Adjustment', 'Carton weight was less than 1 lb, adjusted to 1 lb minimum');
+            // Join with comma (no space) and truncate to 30 characters
+            var result = itemIds.join(',');
+            if (result.length > 30) {
+                result = result.substring(0, 30);
             }
 
-            log.debug('PackShip Weight Final', 'Final carton weight: ' + totalWeight + ' lbs');
-            return totalWeight;
+            log.debug('getCartonItemIds', 'Item IDs for carton: ' + result);
+            return result;
         }
 
         /**
