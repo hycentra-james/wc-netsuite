@@ -10,9 +10,21 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
         
         // FedEx Shipping Method IDs that should trigger rate quote
         const FEDEX_SHIPPING_METHOD_IDS = [
-            3, 15, 3786, 16, 3783, 17, 18, 11597, 11596, 19, 
+            3, 15, 3786, 16, 3783, 17, 18, 11597, 11596, 19,
             3781, 20, 8987, 3782, 14075, 22, 3785, 23, 3784
         ];
+
+        // Customer constants for order type identification
+        const WEBSITE_PARENT_CUSTOMER_ID = 330;
+        const EDI_CUSTOMER_IDS = [329, 275, 317, 12703]; // Home Depot = 317, Home Depot Pro = 12703, Lowe's = 275, Wayfair = 329
+
+        // FedEx shipping method IDs for Ground and Home Delivery
+        const FEDEX_GROUND_ID = 19;
+        const FEDEX_HOME_ID = 20;
+
+        // Ship Type constants (custcol_fmt_ship_type from customlist_fmt_ship_type_list)
+        const SHIP_TYPE_SMALL_PARCEL = 1;
+        const SHIP_TYPE_LTL = 2;
         
         /**
          * Check if shipping address has changed between old and new record
@@ -79,7 +91,170 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
                 return true;
             }
         }
-        
+
+        /**
+         * Determine the order type based on customer
+         *
+         * @param {record} salesOrderRecord The Sales Order record
+         * @returns {string} Order type: 'WEBSITE', 'EDI', or 'OTHER'
+         */
+        function getOrderType(salesOrderRecord) {
+            try {
+                var customerId = salesOrderRecord.getValue({ fieldId: 'entity' });
+                if (!customerId) {
+                    log.debug('Get Order Type', 'No customer ID found');
+                    return 'OTHER';
+                }
+
+                // Check if customer is in EDI list
+                if (EDI_CUSTOMER_IDS.indexOf(parseInt(customerId)) !== -1) {
+                    log.debug('Get Order Type', 'Customer ' + customerId + ' is EDI customer');
+                    return 'EDI';
+                }
+
+                // Check if customer's parent is Website parent AND otherrefnum starts with "WEB-"
+                try {
+                    var customerLookup = search.lookupFields({
+                        type: search.Type.CUSTOMER,
+                        id: customerId,
+                        columns: ['parent']
+                    });
+                    var parentId = customerLookup.parent && customerLookup.parent.length > 0 ?
+                        customerLookup.parent[0].value : null;
+
+                    if (parentId && parseInt(parentId) === WEBSITE_PARENT_CUSTOMER_ID) {
+                        // Also check if otherrefnum starts with "WEB-"
+                        var otherRefNum = salesOrderRecord.getValue({ fieldId: 'otherrefnum' }) || '';
+                        if (otherRefNum.toString().indexOf('WEB-') === 0) {
+                            log.debug('Get Order Type', 'Customer ' + customerId + ' has Website parent (' + parentId + ') and otherrefnum starts with WEB- (' + otherRefNum + ')');
+                            return 'WEBSITE';
+                        } else {
+                            log.debug('Get Order Type', 'Customer ' + customerId + ' has Website parent but otherrefnum does not start with WEB- (' + otherRefNum + ')');
+                        }
+                    }
+                } catch (lookupError) {
+                    log.debug('Get Order Type', 'Could not lookup customer parent: ' + lookupError.message);
+                }
+
+                log.debug('Get Order Type', 'Customer ' + customerId + ' is OTHER type');
+                return 'OTHER';
+
+            } catch (e) {
+                log.error({
+                    title: 'Get Order Type Error',
+                    details: 'Error determining order type: ' + e.message
+                });
+                return 'OTHER';
+            }
+        }
+
+        /**
+         * Check if any line item on the Sales Order has LTL ship type
+         * If ANY item is LTL, the entire order is considered LTL
+         *
+         * @param {record} salesOrderRecord The Sales Order record
+         * @returns {boolean} True if order contains any LTL items, false if all Small Parcel
+         */
+        function isOrderLTL(salesOrderRecord) {
+            try {
+                var lineCount = salesOrderRecord.getLineCount({ sublistId: 'item' });
+
+                if (lineCount === 0) {
+                    log.debug('Is Order LTL', 'No line items found, defaulting to Small Parcel');
+                    return false;
+                }
+
+                for (var i = 0; i < lineCount; i++) {
+                    var shipType = salesOrderRecord.getSublistValue({
+                        sublistId: 'item',
+                        fieldId: 'custcol_fmt_ship_type',
+                        line: i
+                    });
+
+                    if (parseInt(shipType) === SHIP_TYPE_LTL) {
+                        log.debug('Is Order LTL', 'Found LTL item on line ' + i + ', order is LTL');
+                        return true;
+                    }
+                }
+
+                log.debug('Is Order LTL', 'All items are Small Parcel');
+                return false;
+
+            } catch (e) {
+                log.error({
+                    title: 'Is Order LTL Error',
+                    details: 'Error checking ship type: ' + e.message
+                });
+                // Default to Small Parcel on error
+                return false;
+            }
+        }
+
+        /**
+         * Update shipping method based on address classification and order type
+         *
+         * @param {record} salesOrderRecord The Sales Order record
+         * @param {string} classification The address classification
+         * @param {string} orderType The order type (WEBSITE, EDI, OTHER)
+         * @param {number} currentShipMethodId The current shipping method ID
+         */
+        function updateShippingMethod(salesOrderRecord, classification, orderType, currentShipMethodId) {
+            try {
+                // Determine target shipping method based on classification
+                // RESIDENTIAL, MIXED, UNKNOWN → FedEx Home (20)
+                // BUSINESS → FedEx Ground (19)
+                var targetShipMethodId = FEDEX_HOME_ID; // Default to FedEx Home
+                if (classification === 'BUSINESS') {
+                    targetShipMethodId = FEDEX_GROUND_ID;
+                }
+
+                var shouldUpdateShipMethod = false;
+
+                if (orderType === 'WEBSITE') {
+                    // Website orders: Always update shipping method
+                    shouldUpdateShipMethod = true;
+                    log.debug('Update Shipping Method', 'Website order - will update shipping method');
+                } else if (orderType === 'EDI') {
+                    // EDI orders: Only update if current method is Ground (19) or Home (20)
+                    var currentMethodInt = parseInt(currentShipMethodId);
+                    if (currentMethodInt === FEDEX_GROUND_ID || currentMethodInt === FEDEX_HOME_ID) {
+                        shouldUpdateShipMethod = true;
+                        log.debug('Update Shipping Method', 'EDI order with Ground/Home method - will update shipping method');
+                    } else {
+                        log.debug('Update Shipping Method', 'EDI order with non-Ground/Home method (' + currentShipMethodId + ') - preserving original method');
+                    }
+                } else {
+                    // OTHER orders: Don't update shipping method
+                    log.debug('Update Shipping Method', 'Other order type - not updating shipping method');
+                }
+
+                if (shouldUpdateShipMethod) {
+                    var currentMethodInt = parseInt(currentShipMethodId);
+                    if (currentMethodInt !== targetShipMethodId) {
+                        salesOrderRecord.setValue({
+                            fieldId: 'shipmethod',
+                            value: targetShipMethodId
+                        });
+                        log.audit({
+                            title: 'Shipping Method Updated',
+                            details: 'Sales Order: ' + salesOrderRecord.id + ', Order Type: ' + orderType +
+                                ', Classification: ' + classification + ', Old Method: ' + currentShipMethodId +
+                                ', New Method: ' + targetShipMethodId
+                        });
+                    } else {
+                        log.debug('Update Shipping Method', 'Shipping method already correct: ' + targetShipMethodId);
+                    }
+                }
+
+            } catch (e) {
+                log.error({
+                    title: 'Update Shipping Method Error',
+                    details: 'Error updating shipping method: ' + e.message
+                });
+                // Don't throw - let the order save proceed
+            }
+        }
+
         /**
          * Update Sales Order residential flag and address type based on classification
          *
@@ -91,17 +266,12 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
                 log.debug('Update Address Classification', 'Updating classification: ' + classification);
                 
                 // Determine residential flag and address type
-                var isResidential = false;
-                var addressType = null;
-                
-                if (classification === 'RESIDENTIAL') {
-                    isResidential = true;
-                    addressType = 1; // Residential
-                } else if (classification === 'BUSINESS') {
-                    isResidential = false;
-                    addressType = 2; // Commercial
-                } else {
-                    // MIXED or UNKNOWN - default to commercial
+                // RESIDENTIAL, MIXED, UNKNOWN → Residential (default)
+                // BUSINESS → Commercial
+                var isResidential = true;
+                var addressType = 1; // Default to Residential
+
+                if (classification === 'BUSINESS') {
                     isResidential = false;
                     addressType = 2; // Commercial
                 }
@@ -172,7 +342,96 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
                 throw e;
             }
         }
-        
+
+        /**
+         * Update address classification for EDI orders based on ship method
+         * Skips FedEx API and forces address type to match ship method
+         * Ground (19) → Commercial, Home (20) → Residential
+         *
+         * @param {record} salesOrderRecord The Sales Order record
+         * @param {number} shipMethodId The shipping method ID (19=Ground, 20=Home)
+         */
+        function updateAddressClassificationForEDI(salesOrderRecord, shipMethodId) {
+            try {
+                var isResidential;
+                var addressType;
+                var shipMethodName;
+
+                if (parseInt(shipMethodId) === FEDEX_GROUND_ID) {
+                    // FedEx Ground → Force Commercial
+                    isResidential = false;
+                    addressType = 2;
+                    shipMethodName = 'FedEx Ground';
+                } else if (parseInt(shipMethodId) === FEDEX_HOME_ID) {
+                    // FedEx Home → Force Residential
+                    isResidential = true;
+                    addressType = 1;
+                    shipMethodName = 'FedEx Home';
+                } else {
+                    log.debug('EDI Address Classification', 'Ship method ' + shipMethodId + ' is not Ground or Home, skipping');
+                    return;
+                }
+
+                log.debug('EDI Address Classification', 'Skipping FedEx API - respecting ship method assigned by EDI customer. Ship Method: ' + shipMethodName + ' (' + shipMethodId + ')');
+                log.debug('EDI Address Classification', 'Forcing address type: ' + (isResidential ? 'Residential' : 'Commercial'));
+
+                // Update shipisresidential field
+                try {
+                    salesOrderRecord.setValue({
+                        fieldId: 'shipisresidential',
+                        value: isResidential
+                    });
+                    log.debug('EDI Address Classification', 'Updated shipisresidential to: ' + isResidential);
+                } catch (fieldError) {
+                    log.debug('EDI Address Classification', 'Could not set shipisresidential: ' + fieldError.message);
+                }
+
+                // Update shipping address subrecord
+                try {
+                    var shippingAddressSubrecord = salesOrderRecord.getSubrecord({ fieldId: 'shippingaddress' });
+                    if (shippingAddressSubrecord) {
+                        var subrecordFieldNames = ['isresidential', 'shipisresidential', 'residential'];
+                        for (var i = 0; i < subrecordFieldNames.length; i++) {
+                            try {
+                                shippingAddressSubrecord.setValue({
+                                    fieldId: subrecordFieldNames[i],
+                                    value: isResidential
+                                });
+                                log.debug('EDI Address Classification', 'Updated ' + subrecordFieldNames[i] + ' on subrecord to: ' + isResidential);
+                                break;
+                            } catch (subrecordFieldError) {
+                                continue;
+                            }
+                        }
+                    }
+                } catch (subrecordError) {
+                    log.debug('EDI Address Classification', 'Could not access shipping address subrecord: ' + subrecordError.message);
+                }
+
+                // Update custbody_hyc_address_type field
+                try {
+                    salesOrderRecord.setValue({
+                        fieldId: 'custbody_hyc_address_type',
+                        value: addressType
+                    });
+                    log.debug('EDI Address Classification', 'Updated custbody_hyc_address_type to: ' + addressType);
+                } catch (fieldError) {
+                    log.debug('EDI Address Classification', 'Could not set custbody_hyc_address_type: ' + fieldError.message);
+                }
+
+                log.audit({
+                    title: 'EDI Address Classification Forced',
+                    details: 'Sales Order: ' + salesOrderRecord.id + ', Ship Method: ' + shipMethodName + ', Forced to: ' + (isResidential ? 'Residential' : 'Commercial')
+                });
+
+            } catch (e) {
+                log.error({
+                    title: 'EDI Address Classification Error',
+                    details: 'Error updating address classification for EDI: ' + e.message
+                });
+            }
+        }
+
         /**
          * Before Submit event handler
          * Validates address and gets FedEx rate quote when shipping method is updated
@@ -200,6 +459,7 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
                 var isPendingFulfillment = false;
                 
                 // Check if this is a CREATE operation (new Sales Order)
+                log.debug('FedEx Rate Quote', 'Context type: ' + context.type);
                 var isCreateOperation = (context.type === context.UserEventType.CREATE) || !oldRecord;
                 
                 if (isCreateOperation) {
@@ -219,31 +479,83 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
                 }
                 
                 // ===== ADDRESS VALIDATION LOGIC =====
-                // Trigger address validation if:
-                // A) Shipping method changed TO FedEx (old != FedEx, new == FedEx)
-                // B) Address changed while shipping method is already FedEx
+                // Determine order type for CREATE operations
+                var orderType = isCreateOperation ? getOrderType(newRecord) : null;
+
+                // Check if order is LTL (any line item has LTL ship type)
+                var orderIsLTL = isCreateOperation ? isOrderLTL(newRecord) : false;
+
+                // Determine if we should validate address
                 var shouldValidateAddress = false;
-                if (isNewFedEx) {
-                    if (!isOldFedEx) {
-                        // Condition A: Shipping method changed TO FedEx
+                var shouldUpdateShipMethod = false;
+
+                if (isCreateOperation) {
+                    // CREATE operation logic based on order type
+                    if (orderType === 'WEBSITE') {
+                        // Website orders: Always validate on CREATE
                         shouldValidateAddress = true;
-                        log.debug('FedEx Address Validation', 'Triggering validation: Shipping method changed TO FedEx');
-                    } else if (hasShippingAddressChanged(oldRecord, newRecord)) {
-                        // Condition B: Address changed while already FedEx
-                        shouldValidateAddress = true;
-                        log.debug('FedEx Address Validation', 'Triggering validation: Address changed while shipping method is FedEx');
+                        // Only update ship method for Small Parcel orders
+                        if (orderIsLTL) {
+                            shouldUpdateShipMethod = false;
+                            log.debug('FedEx Address Validation', 'Website LTL order CREATE - validation only, no ship method update');
+                        } else {
+                            shouldUpdateShipMethod = true;
+                            log.debug('FedEx Address Validation', 'Website Small Parcel order CREATE - validation and ship method update');
+                        }
+                    } else if (orderType === 'EDI') {
+                        // EDI orders: Different handling for Small Parcel vs LTL
+                        if (orderIsLTL) {
+                            // LTL: Call FedEx API to classify address, no ship method change
+                            shouldValidateAddress = true;
+                            shouldUpdateShipMethod = false;
+                            log.debug('FedEx Address Validation', 'EDI LTL order CREATE - calling API for address classification');
+                        } else {
+                            // Small Parcel - check if current method is Ground (19) or Home (20)
+                            var currentMethodInt = parseInt(newShipMethodId);
+                            if (currentMethodInt === FEDEX_GROUND_ID || currentMethodInt === FEDEX_HOME_ID) {
+                                // Skip FedEx API, force address type based on ship method
+                                shouldValidateAddress = false;
+                                shouldUpdateShipMethod = false;
+                                // Force address classification based on ship method (Ground→Commercial, Home→Residential)
+                                updateAddressClassificationForEDI(newRecord, currentMethodInt);
+                                log.debug('FedEx Address Validation', 'EDI Small Parcel order CREATE - skipped API, forced address type based on ship method');
+                            } else {
+                                // Other FedEx methods or non-FedEx: No validation or updates
+                                shouldValidateAddress = false;
+                                shouldUpdateShipMethod = false;
+                                log.debug('FedEx Address Validation', 'EDI Small Parcel order CREATE with non-Ground/Home method (' + newShipMethodId + ') - no action');
+                            }
+                        }
+                    } else {
+                        // OTHER orders: Only validate if FedEx method (existing behavior)
+                        if (isNewFedEx) {
+                            shouldValidateAddress = true;
+                            log.debug('FedEx Address Validation', 'Other order CREATE with FedEx method - triggering address validation');
+                        }
+                    }
+                } else {
+                    // EDIT operation: Keep existing logic
+                    // Validate if shipping method changed TO FedEx or address changed while FedEx
+                    if (isNewFedEx) {
+                        if (!isOldFedEx) {
+                            shouldValidateAddress = true;
+                            log.debug('FedEx Address Validation', 'Shipping method changed TO FedEx - triggering validation');
+                        } else if (hasShippingAddressChanged(oldRecord, newRecord)) {
+                            shouldValidateAddress = true;
+                            log.debug('FedEx Address Validation', 'Address changed while FedEx - triggering validation');
+                        }
                     }
                 }
-                
+
                 if (shouldValidateAddress) {
                     try {
                         log.debug('FedEx Address Validation', 'Processing address validation for Sales Order: ' + newRecord.id);
-                        
+
                         // Call address validation API
                         var validationResult = fedexAddressValidation.validateAddress(newRecord);
                         var classification = validationResult.classification;
                         var apiResponse = validationResult.apiResponse;
-                        
+
                         // Store API response in custom field
                         try {
                             newRecord.setValue({
@@ -253,17 +565,25 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
                         } catch (fieldError) {
                             log.debug('FedEx Address Validation', 'Could not set custbody_shipping_api_response field: ' + fieldError.message);
                         }
-                        
+
                         // Update residential flag and address type
                         updateAddressClassification(newRecord, classification);
-                        
+
+                        // Update shipping method for Website and EDI orders on CREATE
+                        if (shouldUpdateShipMethod && isCreateOperation) {
+                            updateShippingMethod(newRecord, classification, orderType, newShipMethodId);
+                            // Re-read the ship method as it may have been updated
+                            newShipMethodId = newRecord.getValue({ fieldId: 'shipmethod' });
+                            isNewFedEx = newShipMethodId && FEDEX_SHIPPING_METHOD_IDS.indexOf(parseInt(newShipMethodId)) !== -1;
+                        }
+
                     } catch (e) {
                         // Log error but don't block save
                         log.error({
                             title: 'FedEx Address Validation Error',
                             details: 'Error validating address: ' + e.message + '\nStack: ' + e.stack
                         });
-                        
+
                         // Store API response if available (even for errors)
                         try {
                             if (e.apiResponse) {
