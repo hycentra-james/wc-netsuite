@@ -474,12 +474,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 log.debug('Multiple Tracking Info', 'Master tracking: ' + masterTrackingNumber + ', Pieces: ' + pieceResponses.length);
                 
                 // Build a map of packageSequenceNumber -> tracking number
+                // Note: FedEx API only includes packageSequenceNumber for multi-package shipments,
+                // not for single-package shipments. Use array index (1-based) as fallback.
                 var sequenceToTrackingMap = {};
                 for (var i = 0; i < pieceResponses.length; i++) {
                     var pieceResponse = pieceResponses[i];
-                    var packageSequenceNumber = pieceResponse.packageSequenceNumber;
+                    // Use FedEx-provided sequence if available, otherwise use array index + 1
+                    var packageSequenceNumber = pieceResponse.packageSequenceNumber || (i + 1);
                     var trackingNumber;
-                    
+
                     if (packageSequenceNumber === 1) {
                         // First package gets master tracking number
                         trackingNumber = masterTrackingNumber;
@@ -489,7 +492,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         trackingNumber = pieceResponse.trackingNumber;
                         log.debug('FedEx Sequence Mapping', 'Sequence ' + packageSequenceNumber + ' -> Tracking: ' + trackingNumber);
                     }
-                    
+
                     sequenceToTrackingMap[packageSequenceNumber] = trackingNumber;
                 }
                 
@@ -546,7 +549,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 
                 if (cartonInfo.length === 0) {
                     log.debug('Multiple Tracking Warning', 'No valid carton numbers found, falling back to sequential assignment');
-                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber, recordForUpdate);
                     return;
                 }
                 
@@ -582,7 +585,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // If we didn't match any packages by carton number, fall back to sequential assignment
                 if (packageUpdates.length === 0) {
                     log.debug('Multiple Tracking Warning', 'No packages matched by carton number, falling back to sequential assignment');
-                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber);
+                    updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber, recordForUpdate);
                     return;
                 }
                 
@@ -623,40 +626,42 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {string} fulfillmentId The Item Fulfillment record ID
          * @param {Array} pieceResponses FedEx piece responses
          * @param {string} masterTrackingNumber Master tracking number
+         * @param {record} [existingRecord] Optional pre-loaded record to avoid double loading
          */
-        function updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber) {
+        function updateTrackingNumbersSequential(fulfillmentId, pieceResponses, masterTrackingNumber, existingRecord) {
             try {
                 log.debug('Sequential Tracking', 'Using sequential tracking assignment for fulfillment: ' + fulfillmentId);
-                
-                var recordForUpdate = record.load({
+
+                // Use existing record if provided, otherwise load fresh
+                var recordForUpdate = existingRecord || record.load({
                     type: record.Type.ITEM_FULFILLMENT,
                     id: fulfillmentId
                 });
-                
+
                 var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
-                
+
                 for (var i = 0; i < Math.min(packageCount, pieceResponses.length); i++) {
                     var trackingNumber;
-                    
+
                     if (i === 0) {
                         trackingNumber = masterTrackingNumber;
                     } else {
                         trackingNumber = pieceResponses[i].trackingNumber;
                     }
-                    
+
                     recordForUpdate.setSublistValue({
                         sublistId: 'package',
                         fieldId: 'packagetrackingnumber',
                         line: i,
                         value: trackingNumber
                     });
-                    
+
                     log.debug('Sequential Tracking Update', 'Package ' + (i + 1) + ': ' + trackingNumber);
                 }
-                
+
                 recordForUpdate.save();
                 log.debug('Sequential Tracking Success', 'Updated ' + Math.min(packageCount, pieceResponses.length) + ' tracking numbers sequentially');
-                
+
             } catch (e) {
                 log.error('Sequential Tracking Error', 'Error in sequential tracking assignment: ' + e.message);
             }
