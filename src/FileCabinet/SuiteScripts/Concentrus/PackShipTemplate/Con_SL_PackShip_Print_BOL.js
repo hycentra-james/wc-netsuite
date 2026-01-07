@@ -67,7 +67,7 @@ define(['N/record','N/search','N/runtime','./Con_Lib_PackShip_Lib'], (record, se
           break;
         case CUSTOMER.LOWES_HOME_CENTERS_LLC:
             if (addressType === ADDRESS_TYPE.RESIDENTIAL && shippingMethod === SHIPPING_METHOD.FEDEX_FREIGHT_PRIORITY_FEDP) return '“Basic” Delivery Service';
-            if (addressType === ADDRESS_TYPE.COMMERCIAL && shippingMethod !== SHIPPING_METHOD.FEDEX_FREIGHT_PRIORITY_FEDP) return 'COMMERCIAL';
+            if (addressType === ADDRESS_TYPE.COMMERCIAL) return 'COMMERCIAL';
             if (addressType === ADDRESS_TYPE.RESIDENTIAL && shippingMethod !== SHIPPING_METHOD.FEDEX_FREIGHT_PRIORITY_FEDP) return 'Residential Delivery / Liftgate Approved / NO SIGNATURE REQUIRED';
     }
   }
