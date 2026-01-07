@@ -139,10 +139,13 @@ define(['N/record', 'N/log', 'N/search'],
 
                         var purchaseOrderRS = purchaseOrderSearch.run().getRange({ start: 0, end: 1 });
 
+                        var poInternalId = null;
                         if (purchaseOrderRS && purchaseOrderRS.length > 0) {
+                            poInternalId = purchaseOrderRS[0].getValue({ name: 'internalid' });
+
                             currentRecord.setValue({
                                 fieldId: 'custrecord_hyc_sqi_lot_no',
-                                value: purchaseOrderRS[0].getValue({ name: 'internalid' })
+                                value: poInternalId
                             });
                             currentRecord.setValue({
                                 fieldId: 'custrecord_hyc_sqi_manufacturer',
@@ -151,9 +154,11 @@ define(['N/record', 'N/log', 'N/search'],
                         }
 
                         // Lookup the Item unit cost from PO line item
+                        // Use poInternalId if found, otherwise fallback to poNumberLookup (tranid)
+                        var poLookupId = poInternalId || poNumberLookup;
                         var lookupItemId = issueItemId || itemId; // Use issueItemId if available, otherwise use itemId
-                        var unitCost = getItemUnitCostFromPO(poNumberLookup, lookupItemId);
-                        
+                        var unitCost = getItemUnitCostFromPO(poLookupId, lookupItemId);
+
                         if (unitCost !== null) {
                             log.debug('populateItemInfo', 'Found unit cost: ' + unitCost + ' for item: ' + lookupItemId);
                             currentRecord.setValue({
@@ -161,7 +166,7 @@ define(['N/record', 'N/log', 'N/search'],
                                 value: unitCost
                             });
                         } else {
-                            log.debug('populateItemInfo', 'No unit cost found for item: ' + lookupItemId + ' in PO: ' + poNumberLookup);
+                            log.debug('populateItemInfo', 'No unit cost found for item: ' + lookupItemId + ' in PO: ' + poLookupId);
                         }
                     }
 

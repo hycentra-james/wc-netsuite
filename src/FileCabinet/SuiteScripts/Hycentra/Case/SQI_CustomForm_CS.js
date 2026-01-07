@@ -106,7 +106,8 @@ define(['N/record', 'N/search', 'N/log', 'N/format', '../moment.min.js', './SQI_
         }
 
         function handleIssueItemSearch(salesOrderId, itemId, currentRecord) {
-            helper.populateItemInfo(salesOrderId, itemId, currentRecord);
+            // Pass 4 parameters: orderId, itemId, issueItemId (null), currentRecord
+            helper.populateItemInfo(salesOrderId, itemId, null, currentRecord);
         }
 
         return {
