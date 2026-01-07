@@ -4,7 +4,9 @@
  * Logic mirrors original buildLineCarrierRows in BOL Suitelet:
  *  - lineBoxes = boxesPerUnit * quantity
  *  - linePalletQty = palletQtyPerUnit * quantity
- *  - lineWeight = weightPerUnit * quantity
+ *  - lineCartonWeight = weightPerUnit * quantity (from custitem_fmt_total_carton_weight)
+ *  - linePalletWeight = palletWeightPerUnit * linePalletQty (from custitem_fmt_pallet_weight)
+ *  - lineWeight = lineCartonWeight + linePalletWeight
  * Totals are sums of those line-level values.
  *
  * @NApiVersion 2.1
@@ -13,8 +15,9 @@
 define(['N/search','N/record','N/log'], (search, record, log) => {
   const FIELD_IDS = Object.freeze({
     ITEM_BOXES: 'custitem_fmt_no_boxes',
-    ITEM_WEIGHT: 'custitem_fmt_shipping_weight',
+    ITEM_WEIGHT: 'custitem_fmt_total_carton_weight',
     ITEM_PALLET_QTY: 'custitem_fmt_pallet_quantity',
+    ITEM_PALLET_WEIGHT: 'custitem_fmt_pallet_weight',
     ITEM_LOWES_COMMODITY: 'custitem_fmt_lowes_item_number',
     ITEM_HD_COMMODITY: 'custitem_hyc_hd_product_name',
     ITEM_NMFC: 'custitem_fmt_nmfc_code',
@@ -38,6 +41,7 @@ define(['N/search','N/record','N/log'], (search, record, log) => {
           FIELD_IDS.ITEM_BOXES,
           FIELD_IDS.ITEM_WEIGHT,
           FIELD_IDS.ITEM_PALLET_QTY,
+          FIELD_IDS.ITEM_PALLET_WEIGHT,
           FIELD_IDS.ITEM_LOWES_COMMODITY,
           FIELD_IDS.ITEM_HD_COMMODITY,
           FIELD_IDS.ITEM_NMFC,
@@ -48,6 +52,7 @@ define(['N/search','N/record','N/log'], (search, record, log) => {
         boxesPerUnit: Number(lf[FIELD_IDS.ITEM_BOXES]) || 0,
         weightPerUnit: Number(lf[FIELD_IDS.ITEM_WEIGHT]) || 0,
         palletQtyPerUnit: Number(lf[FIELD_IDS.ITEM_PALLET_QTY]) || 0,
+        palletWeightPerUnit: Number(lf[FIELD_IDS.ITEM_PALLET_WEIGHT]) || 0,
         lowesCommodity: lf[FIELD_IDS.ITEM_LOWES_COMMODITY] || '',
         hdCommodity: lf[FIELD_IDS.ITEM_HD_COMMODITY] || '',
         nmfc: lf[FIELD_IDS.ITEM_NMFC] || '',
@@ -58,6 +63,7 @@ define(['N/search','N/record','N/log'], (search, record, log) => {
         boxesPerUnit: 0,
         weightPerUnit: 0,
         palletQtyPerUnit: 0,
+        palletWeightPerUnit: 0,
         lowesCommodity: '',
         hdCommodity: '',
         nmfc: '',
@@ -103,7 +109,9 @@ define(['N/search','N/record','N/log'], (search, record, log) => {
       const f = lookupItemFieldsCached(itemId, cache);
       const lineBoxes = f.boxesPerUnit * quantity;
       const linePalletQty = f.palletQtyPerUnit * quantity;
-      const lineWeight = f.weightPerUnit * quantity;
+      const lineCartonWeight = f.weightPerUnit * quantity;
+      const linePalletWeight = f.palletWeightPerUnit * linePalletQty;
+      const lineWeight = lineCartonWeight + linePalletWeight;
       totalBoxes += lineBoxes;
       totalPalletQty += linePalletQty;
       totalWeight += lineWeight;
