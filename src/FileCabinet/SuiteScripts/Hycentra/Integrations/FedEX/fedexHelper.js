@@ -1913,7 +1913,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         response = https.get({
                             url: labelUrl,
                             headers: {
-                                'Authorization': 'Bearer ' + bearerToken
+                                'Authorization': 'Bearer ' + bearerToken,
+                                'Accept': 'application/zpl, text/plain, */*'
                             }
                         });
 
@@ -2197,8 +2198,17 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     }
                 }
 
-                // Join multiple label URLs with comma
-                var labelUrlString = labelUrls.join(',');
+                // Join multiple label URLs with ||| delimiter (comma not safe - FedEx URLs contain commas)
+                var labelUrlString = labelUrls.join('|||');
+
+                // Check if any labels failed to download (still contain FedEx URLs)
+                var failedLabelUrls = labelUrls.filter(function(url) {
+                    return url && url.indexOf('https://www.fedex.com') === 0;
+                });
+                var originalLabelUrlString = failedLabelUrls.length > 0 ? failedLabelUrls.join('|||') : '';
+                if (originalLabelUrlString) {
+                    log.audit('Label Download Failed', 'Storing original FedEx URLs for retry: ' + originalLabelUrlString);
+                }
 
                 var printFedExLabelsStartTime = Date.now();
                 // Print the labels
@@ -2222,6 +2232,11 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     custbody_shipment_transaction_id: transactionId,
                     custbody_shipping_api_response: JSON.stringify(response.result)
                 };
+
+                // Store original FedEx URLs if download failed (for retry functionality)
+                if (originalLabelUrlString) {
+                    updateValues.custbody_original_label_url = originalLabelUrlString;
+                }
 
                 // Only add error message if there are alerts
                 if (alertsJson) {
@@ -2323,8 +2338,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     accountId: runtime.accountId
                 });
 
-                // Split multiple URLs (comma-separated)
-                var urls = fedexLabelUrl.split(',');
+                // Handle both new ||| delimiter and legacy comma delimiter for backward compatibility
+                // New format uses ||| because FedEx URLs contain commas
+                var urls;
+                if (fedexLabelUrl.indexOf('|||') !== -1) {
+                    urls = fedexLabelUrl.split('|||');
+                } else {
+                    // Legacy comma delimiter (only safe for File Cabinet URLs)
+                    urls = fedexLabelUrl.split(',');
+                }
                 
                 if (urls.length === 1 && urls[0] === '') {
                     log.debug('FedEx Label Print', 'Empty label URL list');
@@ -2396,6 +2418,144 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             }
         }
 
+        /**
+         * Retry downloading labels from stored original FedEx URLs
+         * Used when initial download failed but shipment was created successfully
+         *
+         * @param {string|number} fulfillmentId - Item Fulfillment internal ID
+         * @returns {Object} Result with success status and message
+         */
+        function retryLabelDownload(fulfillmentId) {
+            try {
+                log.debug('Retry Label Download', 'Starting retry for fulfillment: ' + fulfillmentId);
+
+                // Load the fulfillment record to get original URLs and SO number
+                var fulfillmentRecord = record.load({
+                    type: record.Type.ITEM_FULFILLMENT,
+                    id: fulfillmentId,
+                    isDynamic: false
+                });
+
+                var originalLabelUrls = fulfillmentRecord.getValue('custbody_original_label_url');
+                if (!originalLabelUrls) {
+                    return {
+                        success: false,
+                        message: 'No original FedEx label URLs found to retry'
+                    };
+                }
+
+                // Get Sales Order number for filename
+                var createdFrom = fulfillmentRecord.getValue('createdfrom');
+                var salesOrderNumber = '';
+                if (createdFrom) {
+                    try {
+                        var soLookup = search.lookupFields({
+                            type: search.Type.SALES_ORDER,
+                            id: createdFrom,
+                            columns: ['tranid']
+                        });
+                        salesOrderNumber = soLookup.tranid || '';
+                    } catch (e) {
+                        log.debug('Retry Label Download', 'Could not lookup SO number: ' + e.message);
+                    }
+                }
+
+                // Get fresh bearer token
+                var tokenRecord = getTokenRecord();
+                if (!tokenRecord || !tokenRecord.bearerToken) {
+                    return {
+                        success: false,
+                        message: 'Could not obtain FedEx bearer token'
+                    };
+                }
+                var bearerToken = tokenRecord.bearerToken;
+
+                // Split URLs and download each
+                var urls = originalLabelUrls.split('|||');
+                var downloadedUrls = [];
+                var failedUrls = [];
+
+                for (var i = 0; i < urls.length; i++) {
+                    var originalUrl = urls[i].trim();
+                    if (!originalUrl) continue;
+
+                    log.debug('Retry Label Download', 'Attempting download ' + (i + 1) + ' of ' + urls.length + ': ' + originalUrl);
+
+                    var savedUrl = downloadAndSaveLabel(originalUrl, bearerToken, salesOrderNumber, i + 1);
+
+                    // Check if download succeeded (URL no longer starts with fedex.com)
+                    if (savedUrl.indexOf('https://www.fedex.com') === 0) {
+                        failedUrls.push(savedUrl);
+                    } else {
+                        downloadedUrls.push(savedUrl);
+                    }
+                }
+
+                // Get existing label URLs (that were already downloaded successfully)
+                // Handle both new ||| delimiter and legacy comma delimiter for backward compatibility
+                var existingLabelUrls = fulfillmentRecord.getValue('custbody_shipping_label_url') || '';
+                var existingUrlsRaw;
+                if (existingLabelUrls.indexOf('|||') !== -1) {
+                    existingUrlsRaw = existingLabelUrls.split('|||');
+                } else {
+                    existingUrlsRaw = existingLabelUrls.split(',');
+                }
+                var existingUrls = existingUrlsRaw.filter(function(url) {
+                    return url && url.indexOf('https://www.fedex.com') !== 0;
+                });
+
+                // Combine existing successful URLs with newly downloaded URLs
+                var allSuccessfulUrls = existingUrls.concat(downloadedUrls);
+                var newLabelUrlString = allSuccessfulUrls.join('|||');
+
+                // Update the fulfillment record
+                var updateValues = {
+                    custbody_shipping_label_url: newLabelUrlString
+                };
+
+                // Clear or update original URL field based on remaining failures
+                if (failedUrls.length > 0) {
+                    updateValues.custbody_original_label_url = failedUrls.join('|||');
+                } else {
+                    updateValues.custbody_original_label_url = '';
+                }
+
+                record.submitFields({
+                    type: record.Type.ITEM_FULFILLMENT,
+                    id: fulfillmentId,
+                    values: updateValues
+                });
+
+                // Print the newly downloaded labels
+                if (downloadedUrls.length > 0) {
+                    printFedExLabels(downloadedUrls.join('|||'));
+                }
+
+                var resultMessage = 'Downloaded ' + downloadedUrls.length + ' of ' + urls.length + ' labels';
+                if (failedUrls.length > 0) {
+                    resultMessage += '. ' + failedUrls.length + ' label(s) still failed - original URLs preserved for retry.';
+                }
+
+                log.audit('Retry Label Download', resultMessage);
+
+                return {
+                    success: failedUrls.length === 0,
+                    message: resultMessage,
+                    downloadedCount: downloadedUrls.length,
+                    failedCount: failedUrls.length
+                };
+
+            } catch (e) {
+                var errorMsg = 'Error retrying label download: ' + e.message;
+                log.error('Retry Label Download Error', errorMsg + '\nStack: ' + e.stack);
+                return {
+                    success: false,
+                    message: errorMsg,
+                    error: e.message
+                };
+            }
+        }
+
         return {
             getTokenRecord: getTokenRecord,
             validateToken: validateToken,
@@ -2415,7 +2575,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getShippingLabelMapping: getShippingLabelMapping,
             validatePhoneNumber: validatePhoneNumber,
             createShipment: createShipment,
-            printFedExLabels: printFedExLabels
+            printFedExLabels: printFedExLabels,
+            retryLabelDownload: retryLabelDownload
         };
     }
 ); 
