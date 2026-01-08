@@ -77,6 +77,23 @@ define(['N/record', 'N/runtime', 'N/url'], (record, runtime, url) => {
           label: 'Print FedEx Label',
           functionName: 'conPsPrintFedexLabel'
         });
+
+        // Add Re-create Shipment button for FedEx ship methods
+        form.addButton({
+          id: 'custpage_con_ps_recreate_shipment',
+          label: 'Re-create Shipment',
+          functionName: 'conPsRecreateShipment'
+        });
+
+        // Add Retry Label Download button if there are failed label downloads
+        const originalLabelUrl = fulfillRec.getValue({ fieldId: 'custbody_original_label_url' });
+        if (originalLabelUrl) {
+          form.addButton({
+            id: 'custpage_con_ps_retry_label',
+            label: 'Retry Label Download',
+            functionName: 'conPsRetryLabelDownload'
+          });
+        }
       }
 
       // Pass context data to client via hidden fields (added only if not existing)

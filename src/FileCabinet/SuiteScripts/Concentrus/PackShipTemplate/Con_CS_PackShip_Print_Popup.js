@@ -381,14 +381,25 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
             hostType: url.HostType.APPLICATION,
             accountId: runtime.accountId
         });
-        const urls = labelUrls.split(',');
+        // Handle both new ||| delimiter and legacy comma delimiter for backward compatibility
+        // New format uses ||| because FedEx URLs contain commas
+        // Legacy format used comma but only works for File Cabinet URLs (not FedEx URLs)
+        let urls;
+        if (labelUrls.indexOf('|||') !== -1) {
+            // New format with ||| delimiter
+            urls = labelUrls.split('|||');
+        } else {
+            // Legacy comma delimiter (only safe for File Cabinet URLs)
+            urls = labelUrls.split(',');
+        }
         if(urls.length === 1 && urls[0] === '') {
             alert('No FedEx label URL found for this Item Fulfillment.');
             return;
         }
-        urls.forEach((url) => {
-            if(url === '') return; // skip empty URLs
-            const fullUrl = domain + url;
+        urls.forEach((labelUrl) => {
+            if(labelUrl === '') return; // skip empty URLs
+            // Handle both File Cabinet URLs (relative) and FedEx URLs (absolute)
+            const fullUrl = labelUrl.startsWith('http') ? labelUrl : domain + labelUrl;
             console.log('FedEx label URL:', fullUrl);
             printNodeLib.printByPrintNode('Print Fedex Label from NS', fullUrl, 'FedEx Label', 1);
         });
@@ -396,6 +407,75 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
     }
 
     function pageInit() {
+    }
+
+    /**
+     * Retry downloading FedEx labels from stored original URLs
+     * Used when initial download failed but shipment was created successfully
+     */
+    function conPsRetryLabelDownload() {
+        const confirmed = confirm('This will retry downloading the FedEx label(s) that failed previously. Continue?');
+        if (!confirmed) return;
+
+        try {
+            const ifId = currentRecord.get().id;
+            console.log('Retrying label download for Item Fulfillment:', ifId);
+
+            // Call the fedexHelper retry function
+            const result = fedexHelper.retryLabelDownload(ifId);
+
+            if (result.success) {
+                alert('Label download successful!\n\n' + result.message);
+                location.reload(); // Refresh to update button visibility
+            } else {
+                alert('Label download completed with issues:\n\n' + result.message);
+                location.reload();
+            }
+        } catch (e) {
+            console.error('Retry label download error:', e);
+            alert('Error retrying label download: ' + e.message);
+        }
+    }
+
+    /**
+     * Re-create FedEx shipment (creates new tracking number and label)
+     * Use with caution - this creates a completely new shipment
+     */
+    function conPsRecreateShipment() {
+        const confirmed = confirm(
+            '⚠️ WARNING: This will create a NEW FedEx shipment with a NEW tracking number.\n\n' +
+            'The previous shipment will still exist in FedEx\'s system.\n\n' +
+            'Only use this if:\n' +
+            '• The original shipment failed completely, OR\n' +
+            '• You need to void and recreate the shipment\n\n' +
+            'Are you sure you want to continue?'
+        );
+        if (!confirmed) return;
+
+        try {
+            const ifId = currentRecord.get().id;
+            console.log('Re-creating shipment for Item Fulfillment:', ifId);
+
+            // Load the fulfillment record
+            const ifRec = record.load({
+                type: record.Type.ITEM_FULFILLMENT,
+                id: ifId,
+                isDynamic: false
+            });
+
+            // Call the fedexHelper createShipment function
+            const result = fedexHelper.createShipment(ifRec, false);
+
+            if (result.success) {
+                alert('Shipment created successfully!\n\nTracking Number: ' + (result.trackingNumber || 'See record'));
+                location.reload();
+            } else {
+                alert('Shipment creation failed:\n\n' + (result.message || result.error || 'Unknown error'));
+            }
+        } catch (e) {
+            console.error('Re-create shipment error:', e);
+            alert('Error re-creating shipment: ' + e.message);
+        }
     }
 
     return {
@@ -406,6 +486,8 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
         conPsPrintUCC,
         conPsPrintPackSlip,
         printPackingSlipWithApi,
-        conPsPrintFedexLabel
+        conPsPrintFedexLabel,
+        conPsRetryLabelDownload,
+        conPsRecreateShipment
     };
 });
