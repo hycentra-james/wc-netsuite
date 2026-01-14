@@ -2,10 +2,15 @@
  *@NApiVersion 2.0
  *@NScriptType MapReduceScript
  *@NAmdConfig  ../../FMT Consultants/config.json
- * 
- * SALES ORDER DRIVEN VERSION
- * Only processes items from sales orders created in the last hour
- * Expected 85-95% performance improvement vs processing all items
+ *
+ * INVENTORY EVENT DRIVEN VERSION
+ * Processes items from inventory-affecting events created in the last hour:
+ * - Sales Orders (commits inventory)
+ * - Item Fulfillments (decreases on-hand inventory)
+ * - Item Receipts from PO (increases on-hand inventory)
+ *
+ * Also finds and updates kits when their component items are affected.
+ * Expected 85-95% performance improvement vs processing all items.
  */
 
 define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', 'underscore', '../moment.min'],
@@ -13,24 +18,24 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
 
         function getInputData() {
             try {
-                log.audit('Starting Sales Order Driven Receipt Date Update', 'Looking for sales orders created in last hour');
-                
+                log.audit('Starting Inventory Event Driven Receipt Date Update', 'Looking for SO, IF, and Receipts in last hour');
+
                 // Calculate proper hourly timeframe (e.g., 8:00-9:00, 9:00-10:00)
                 // Using moment.js for better date handling in company timezone
                 var now = moment();
                 var currentHour = now.hour();
-                
+
                 // Create start time at the top of the previous hour
                 var startTime = moment().hour(currentHour - 1).minute(0).second(0).millisecond(0);
-                
-                // Create end time at the top of current hour  
+
+                // Create end time at the top of current hour
                 var endTime = moment().hour(currentHour).minute(0).second(0).millisecond(0);
-                
+
                 // Format dates for NetSuite search filters (M/d/yy h:mm a format)
                 var startTimeFormatted = startTime.format('M/D/YY h:mm A');
                 var endTimeFormatted = endTime.format('M/D/YY h:mm A');
-                
-                log.audit('Time window for sales orders', {
+
+                log.audit('Time window for inventory events', {
                     'now': now.format('M/D/YYYY h:mm:ss A'),
                     'startTime': startTime.format('M/D/YYYY h:mm:ss A'),
                     'endTime': endTime.format('M/D/YYYY h:mm:ss A'),
@@ -39,28 +44,73 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     'timezone': 'Company timezone (Pacific Time)'
                 });
 
-                // Step 1: Find sales orders created in the last hour (proper hourly windows)
+                // Step 1: Find items from all inventory-affecting events in the last hour
                 var salesOrderItems = findSalesOrderItems(startTimeFormatted, endTimeFormatted);
-                
-                if (!salesOrderItems || salesOrderItems.length === 0) {
-                    log.audit('No sales orders found in time window', 'Skipping script execution');
-                    return []; // Return empty array to skip processing
-                }
-                
-                log.audit('Found items from recent sales orders', {
-                    'itemCount': salesOrderItems.length,
-                    'items': salesOrderItems
+                var fulfillmentItems = findItemFulfillmentItems(startTimeFormatted, endTimeFormatted);
+                var receiptItems = findItemReceiptItems(startTimeFormatted, endTimeFormatted);
+
+                log.audit('Items found from inventory events', {
+                    'salesOrderItems': salesOrderItems.length,
+                    'fulfillmentItems': fulfillmentItems.length,
+                    'receiptItems': receiptItems.length
                 });
 
-                // Step 2: Get all related kit components for any kit items sold
-                var allItemsToProcess = expandKitComponents(salesOrderItems);
-                
+                // Step 2: Merge all unique items from all sources
+                var allEventItems = [];
+                var processedItems = {};
+
+                // Helper to add unique items
+                function addUniqueItems(itemArray) {
+                    for (var i = 0; i < itemArray.length; i++) {
+                        var itemId = itemArray[i];
+                        if (!processedItems[itemId]) {
+                            allEventItems.push(itemId);
+                            processedItems[itemId] = true;
+                        }
+                    }
+                }
+
+                addUniqueItems(salesOrderItems);
+                addUniqueItems(fulfillmentItems);
+                addUniqueItems(receiptItems);
+
+                // Step 3: Find kits that contain any of the inventory items from IF/Receipt
+                // This ensures kit quantities are updated when their components change
+                var inventoryItemsFromEvents = [];
+                for (var i = 0; i < fulfillmentItems.length; i++) {
+                    if (inventoryItemsFromEvents.indexOf(fulfillmentItems[i]) === -1) {
+                        inventoryItemsFromEvents.push(fulfillmentItems[i]);
+                    }
+                }
+                for (var j = 0; j < receiptItems.length; j++) {
+                    if (inventoryItemsFromEvents.indexOf(receiptItems[j]) === -1) {
+                        inventoryItemsFromEvents.push(receiptItems[j]);
+                    }
+                }
+
+                var affectedKits = findKitsContainingComponents(inventoryItemsFromEvents);
+                addUniqueItems(affectedKits);
+
+                log.audit('Merged items from all sources', {
+                    'totalUniqueItems': allEventItems.length,
+                    'affectedKits': affectedKits.length
+                });
+
+                // Early exit if no items to process
+                if (allEventItems.length === 0) {
+                    log.audit('No inventory events found in time window', 'Skipping script execution');
+                    return [];
+                }
+
+                // Step 4: Expand kit components for any kit items in the list
+                var allItemsToProcess = expandKitComponents(allEventItems);
+
                 log.audit('Final items to process (including kit components)', {
                     'totalItems': allItemsToProcess.length,
-                    'originalSalesOrderItems': salesOrderItems.length
+                    'itemsFromEvents': allEventItems.length
                 });
 
-                // Step 3: Create search for these specific items only
+                // Step 5: Create search for these specific items only
                 var itemSearch = search.create({
                     type: search.Type.ITEM,
                     filters: [
@@ -82,7 +132,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 log.audit('Starting script with usage units', usage);
 
                 return itemSearch;
-                
+
             } catch (e) {
                 log.error('Error in getInputData', e);
                 throw e;
@@ -92,7 +142,8 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
         function findSalesOrderItems(startTimeFormatted, endTimeFormatted) {
             var itemIds = [];
             var processedItems = {}; // Prevent duplicates
-            
+            var uniqueOrders = {}; // Track unique SO numbers
+
             // Search for sales orders created in the specified time window
             var salesOrderSearch = search.create({
                 type: search.Type.SALES_ORDER,
@@ -100,7 +151,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     ['datecreated', 'within', startTimeFormatted, endTimeFormatted],
                     'AND',
                     ['mainline', 'is', 'F'], // Get line items, not headers
-                    'AND', 
+                    'AND',
                     ['shipping', 'is', 'F'], // Exclude shipping lines
                     'AND',
                     ['taxline', 'is', 'F'], // Exclude tax lines
@@ -117,7 +168,6 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 ]
             });
 
-            var orderCount = 0;
             var lineCount = 0;
 
             log.debug('Sales order search filters', {
@@ -136,11 +186,14 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 var quantity = result.getValue('quantity');
                 var dateCreated = result.getValue('datecreated');
 
+                // Track unique SO numbers
+                uniqueOrders[soNumber] = true;
+
                 // Track unique items only
                 if (!processedItems[itemId]) {
                     itemIds.push(itemId);
                     processedItems[itemId] = true;
-                    
+
                     log.debug('Found item from sales order', {
                         'salesOrder': soNumber,
                         'itemId': itemId,
@@ -152,17 +205,15 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 }
 
                 lineCount++;
-                if (lineCount % 50 === 0) {
-                    orderCount++;
-                }
-
                 return true;
             });
 
+            var soNumbers = Object.keys(uniqueOrders);
             log.audit('Sales order search completed', {
                 'uniqueItems': itemIds.length,
                 'totalOrderLines': lineCount,
-                'approximateOrders': Math.ceil(lineCount / 5) // Estimate based on avg lines per order
+                'salesOrders': soNumbers.length > 0 ? soNumbers.join(', ') : 'None',
+                'orderCount': soNumbers.length
             });
 
             return itemIds;
@@ -220,6 +271,206 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             });
 
             return allItems;
+        }
+
+        /**
+         * Find items from Item Fulfillments created in the specified time window
+         * This captures inventory decreases when items are shipped
+         */
+        function findItemFulfillmentItems(startTimeFormatted, endTimeFormatted) {
+            var itemIds = [];
+            var processedItems = {};
+            var uniqueFulfillments = {}; // Track unique IF numbers
+
+            var fulfillmentSearch = search.create({
+                type: search.Type.ITEM_FULFILLMENT,
+                filters: [
+                    ['datecreated', 'within', startTimeFormatted, endTimeFormatted],
+                    'AND',
+                    ['mainline', 'is', 'F'],
+                    'AND',
+                    ['shipping', 'is', 'F'],
+                    'AND',
+                    ['taxline', 'is', 'F'],
+                    'AND',
+                    ['item.type', 'anyof', ['InvtPart', 'Kit']]
+                ],
+                columns: [
+                    'tranid',
+                    'item',
+                    search.createColumn({ name: 'type', join: 'item' }),
+                    search.createColumn({ name: 'itemid', join: 'item' }),
+                    'quantity',
+                    'datecreated'
+                ]
+            });
+
+            var lineCount = 0;
+
+            fulfillmentSearch.run().each(function(result) {
+                var ifNumber = result.getValue('tranid');
+                var itemId = result.getValue('item');
+                var itemType = result.getValue({ name: 'type', join: 'item' });
+                var itemName = result.getValue({ name: 'itemid', join: 'item' });
+                var quantity = result.getValue('quantity');
+
+                // Track unique IF numbers
+                uniqueFulfillments[ifNumber] = true;
+
+                if (!processedItems[itemId]) {
+                    itemIds.push(itemId);
+                    processedItems[itemId] = true;
+
+                    log.debug('Found item from Item Fulfillment', {
+                        'fulfillment': ifNumber,
+                        'itemId': itemId,
+                        'itemName': itemName,
+                        'itemType': itemType,
+                        'quantity': quantity
+                    });
+                }
+
+                lineCount++;
+                return true;
+            });
+
+            var ifNumbers = Object.keys(uniqueFulfillments);
+            log.audit('Item Fulfillment search completed', {
+                'uniqueItems': itemIds.length,
+                'totalLines': lineCount,
+                'fulfillments': ifNumbers.length > 0 ? ifNumbers.join(', ') : 'None',
+                'fulfillmentCount': ifNumbers.length
+            });
+
+            return itemIds;
+        }
+
+        /**
+         * Find items from Item Receipts (PO Receipts) created in the specified time window
+         * This captures inventory increases when items are received
+         */
+        function findItemReceiptItems(startTimeFormatted, endTimeFormatted) {
+            var itemIds = [];
+            var processedItems = {};
+            var uniqueReceipts = {}; // Track unique receipt numbers
+
+            var receiptSearch = search.create({
+                type: search.Type.ITEM_RECEIPT,
+                filters: [
+                    ['datecreated', 'within', startTimeFormatted, endTimeFormatted],
+                    'AND',
+                    ['mainline', 'is', 'F'],
+                    'AND',
+                    ['shipping', 'is', 'F'],
+                    'AND',
+                    ['taxline', 'is', 'F'],
+                    'AND',
+                    ['item.type', 'anyof', ['InvtPart']] // Only inventory items on receipts
+                ],
+                columns: [
+                    'tranid',
+                    'item',
+                    search.createColumn({ name: 'type', join: 'item' }),
+                    search.createColumn({ name: 'itemid', join: 'item' }),
+                    'quantity',
+                    'datecreated'
+                ]
+            });
+
+            var lineCount = 0;
+
+            receiptSearch.run().each(function(result) {
+                var receiptNumber = result.getValue('tranid');
+                var itemId = result.getValue('item');
+                var itemType = result.getValue({ name: 'type', join: 'item' });
+                var itemName = result.getValue({ name: 'itemid', join: 'item' });
+                var quantity = result.getValue('quantity');
+
+                // Track unique receipt numbers
+                uniqueReceipts[receiptNumber] = true;
+
+                if (!processedItems[itemId]) {
+                    itemIds.push(itemId);
+                    processedItems[itemId] = true;
+
+                    log.debug('Found item from Item Receipt', {
+                        'receipt': receiptNumber,
+                        'itemId': itemId,
+                        'itemName': itemName,
+                        'itemType': itemType,
+                        'quantity': quantity
+                    });
+                }
+
+                lineCount++;
+                return true;
+            });
+
+            var receiptNumbers = Object.keys(uniqueReceipts);
+            log.audit('Item Receipt search completed', {
+                'uniqueItems': itemIds.length,
+                'totalLines': lineCount,
+                'receipts': receiptNumbers.length > 0 ? receiptNumbers.join(', ') : 'None',
+                'receiptCount': receiptNumbers.length
+            });
+
+            return itemIds;
+        }
+
+        /**
+         * Find all kit items that contain the specified component items
+         * This ensures kits are recalculated when their components change
+         */
+        function findKitsContainingComponents(componentItemIds) {
+            if (!componentItemIds || componentItemIds.length === 0) {
+                return [];
+            }
+
+            var kitIds = [];
+            var processedKits = {};
+
+            var kitSearch = search.create({
+                type: 'kititem',
+                filters: [
+                    ['type', 'anyof', 'Kit'],
+                    'AND',
+                    ['memberitem.internalid', 'anyof', componentItemIds]
+                ],
+                columns: [
+                    'internalid',
+                    'itemid',
+                    search.createColumn({ name: 'internalid', join: 'memberItem' }),
+                    search.createColumn({ name: 'itemid', join: 'memberItem' })
+                ]
+            });
+
+            kitSearch.run().each(function(result) {
+                var kitId = result.getValue('internalid');
+                var kitName = result.getValue('itemid');
+                var componentId = result.getValue({ name: 'internalid', join: 'memberItem' });
+                var componentName = result.getValue({ name: 'itemid', join: 'memberItem' });
+
+                if (!processedKits[kitId]) {
+                    kitIds.push(kitId);
+                    processedKits[kitId] = true;
+
+                    log.debug('Found kit containing component', {
+                        'kitId': kitId,
+                        'kitName': kitName,
+                        'componentId': componentId,
+                        'componentName': componentName
+                    });
+                }
+
+                return true;
+            });
+
+            log.audit('Kit component search completed', {
+                'kitsFound': kitIds.length,
+                'componentsSearched': componentItemIds.length
+            });
+
+            return kitIds;
         }
 
         function map(context) {
@@ -319,34 +570,79 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
 
         function reduce(context) {
             var mapKeyData = context.key;
-            log.debug('Updating item from sales order processing', mapKeyData);
 
             for (var j = 0; j < context.values.length; j++) {
                 var mapValueData = JSON.parse(context.values[j]);
 
                 if (mapValueData.type == 'InvtPart') {
+                    // Lookup current item values before update
+                    var currentValues = search.lookupFields({
+                        type: search.Type.INVENTORY_ITEM,
+                        id: mapKeyData,
+                        columns: ['itemid', 'custitem_fmt_next_receipt_date', 'custitem_fmt_next_receipt_quantity']
+                    });
+
+                    var newReceiptDate = new Date(mapValueData.receiptDate);
+                    var newQuantity = mapValueData.quantityOnOrder;
+
+                    log.debug('Updating Inventory Item', {
+                        itemId: mapKeyData,
+                        itemName: currentValues.itemid,
+                        type: 'InvtPart',
+                        original: {
+                            receiptDate: currentValues.custitem_fmt_next_receipt_date,
+                            quantity: currentValues.custitem_fmt_next_receipt_quantity
+                        },
+                        updated: {
+                            receiptDate: newReceiptDate.toLocaleDateString(),
+                            quantity: newQuantity
+                        }
+                    });
+
                     record.submitFields({
                         type: record.Type.INVENTORY_ITEM,
                         id: mapKeyData,
                         values: {
-                            'custitem_fmt_next_receipt_date': new Date(mapValueData.receiptDate),
-                            'custitem_fmt_next_receipt_quantity': mapValueData.quantityOnOrder
+                            'custitem_fmt_next_receipt_date': newReceiptDate,
+                            'custitem_fmt_next_receipt_quantity': newQuantity
                         }
                     })
                 } else {
+                    // Lookup current kit item values before update
+                    var currentKitValues = search.lookupFields({
+                        type: search.Type.KIT_ITEM,
+                        id: mapKeyData,
+                        columns: ['itemid', 'custitem_fmt_next_receipt_date', 'custitem_fmt_avail_kit_quantity']
+                    });
+
                     var dateToSet;
                     if (!!mapValueData.receiptDate) {
                         dateToSet = new Date(mapValueData.receiptDate);
                     } else {
                         dateToSet = new Date();
                     }
+                    var newAvailableQty = mapValueData.availableQuantity;
+
+                    log.debug('Updating Kit Item', {
+                        itemId: mapKeyData,
+                        itemName: currentKitValues.itemid,
+                        type: 'Kit',
+                        original: {
+                            receiptDate: currentKitValues.custitem_fmt_next_receipt_date,
+                            availableQuantity: currentKitValues.custitem_fmt_avail_kit_quantity
+                        },
+                        updated: {
+                            receiptDate: dateToSet.toLocaleDateString(),
+                            availableQuantity: newAvailableQty
+                        }
+                    });
 
                     record.submitFields({
                         type: record.Type.KIT_ITEM,
                         id: mapKeyData,
                         values: {
                             'custitem_fmt_next_receipt_date': dateToSet,
-                            'custitem_fmt_avail_kit_quantity': mapValueData.availableQuantity
+                            'custitem_fmt_avail_kit_quantity': newAvailableQty
                         }
                     })
                 }
