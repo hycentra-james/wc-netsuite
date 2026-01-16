@@ -20,6 +20,7 @@ define(['N/https','N/log'],
         };
         const PRINTER = {
             SHARP_MX_5070_2: '74452670',
+            HP_E826_WAREHOUSE: '75070427', // HP LaserJet E826 Warehouse (OFFICE04-PC) - for BOL/Packing Slip
             UPS_WORLDSHIP: '74452668',
             UPS_SMALLPARCELWH2: '74637398',//'74452677' //74637398
             UPS_ZP_450_2: '74452675'
@@ -27,7 +28,7 @@ define(['N/https','N/log'],
 
         function getPrinterByReportType(reportType) {
             if (reportType === REPORT_TYPE.PACKING_SLIP || reportType === REPORT_TYPE.BILL_OF_LADING ) {
-                return PRINTER.SHARP_MX_5070_2;
+                return PRINTER.HP_E826_WAREHOUSE;
             } else if (reportType === REPORT_TYPE.UCC_LABEL) {
                 return PRINTER.UPS_ZP_450_2;//return PRINTER.UPS_WORLDSHIP;
             } else if (reportType === REPORT_TYPE.FEDEX_LABEL) {
@@ -48,6 +49,11 @@ define(['N/https','N/log'],
                 content: content,
                 qty: qty
             };
+
+            // Force Tray 4 for BOL and Packing Slip (HP E826 Warehouse printer)
+            if (reportType === REPORT_TYPE.PACKING_SLIP || reportType === REPORT_TYPE.BILL_OF_LADING) {
+                payload.options = { bin: 'Tray 4' };
+            }
 
             const headers = {
                 'Authorization': API_KEY_BTOA,
