@@ -70,12 +70,24 @@ define(['N/record', 'N/runtime', 'N/url'], (record, runtime, url) => {
         '23', // FedEx Standard Overnight
         '3784' // FedEx Standard Overnight® WC
       ];
+      const upsRelatedMethod = [
+        '4',    // UPS Ground
+        '40',   // UPS Ground (WC)
+        '41',   // UPS Next Day Air
+        '43',   // UPS 2nd Day Air
+        '3776', // UPS 3 Day Select
+        '3777', // UPS Next Day Air Early
+        '3778', // UPS Next Day Air Saver
+        '3779', // UPS 2nd Day Air A.M.
+        '3780', // UPS Ground Freight
+        '8988'  // UPS SurePost
+      ];
       const shipMethodId = fulfillRec.getValue({ fieldId: 'shipmethod' });
       if( fedexRelatedMethod.includes(shipMethodId)) { // FedEx Ground internal id
         form.addButton({
           id: 'custpage_con_ps_print_fedex',
           label: 'Print FedEx Label',
-          functionName: 'conPsPrintFedexLabel'
+          functionName: 'conPsPrintSmallParcelLabel'
         });
 
         // Add Re-create Shipment button for FedEx ship methods
@@ -94,6 +106,21 @@ define(['N/record', 'N/runtime', 'N/url'], (record, runtime, url) => {
             functionName: 'conPsRetryLabelDownload'
           });
         }
+      }
+
+      // UPS-related buttons
+      if (upsRelatedMethod.includes(shipMethodId)) {
+        form.addButton({
+          id: 'custpage_con_ps_print_ups',
+          label: 'Print UPS Label',
+          functionName: 'conPsPrintSmallParcelLabel'
+        });
+
+        form.addButton({
+          id: 'custpage_con_ps_recreate_ups_shipment',
+          label: 'Re-create Shipment',
+          functionName: 'conPsRecreateUPSShipment'
+        });
       }
 
       // Pass context data to client via hidden fields (added only if not existing)

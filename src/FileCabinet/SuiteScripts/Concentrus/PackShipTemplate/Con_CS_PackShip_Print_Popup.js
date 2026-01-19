@@ -25,6 +25,10 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
         COMMERCIAL: '2',
     }
 
+    // Carrier ship method arrays for label printing
+    const FEDEX_SHIP_METHODS = ['3', '15', '16', '3783', '17', '19', '20', '22', '3785', '23', '3784'];
+    const UPS_SHIP_METHODS = ['4', '40', '41', '43', '3776', '3777', '3778', '3779', '3780', '8988'];
+
     const LOWES_FULL_SET = new Set(['10443', '3771', '11596', '36', '46']);            // BOL + UCC + Packing Slip
     const LOWES_PACKING_ONLY_SET = new Set(['9', '3788', '10749', '10750', '9607']);   // Packing Slip only
 
@@ -364,46 +368,62 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
         }
     }
 
-    function conPsPrintFedexLabel(){
-        const res = confirm('This will print FedEx label(s) for this Item Fulfillment. Are you sure you want to continue?');
+    /**
+     * Print shipping label(s) for small parcel shipments (FedEx or UPS)
+     * Uses the custbody_shipping_label_url field which stores URLs with ||| separator
+     */
+    function conPsPrintSmallParcelLabel(){
+        const res = confirm('This will print shipping label(s) for this Item Fulfillment. Are you sure you want to continue?');
         if (!res) return;
-        //COPY from Con_UE_Update_SSCC_Number.js
-        //Just for testing purpose, will be removed later
+
         const ifId = currentRecord.get().id;
         const ifRec = record.load({
             type: record.Type.ITEM_FULFILLMENT,
             id: ifId,
             isDynamic: false
         });
+
+        // Determine carrier based on ship method
+        const shipMethodId = ifRec.getValue('shipmethod');
+        let reportType = 'FedEx Label'; // default
+        if (UPS_SHIP_METHODS.includes(String(shipMethodId))) {
+            reportType = 'UPS Label';
+        }
+        console.log('Ship Method:', shipMethodId, '-> Report Type:', reportType);
+
         const labelUrls = ifRec.getValue('custbody_shipping_label_url');
-        console.log('FedEx label URLs:', labelUrls);
+        console.log('Shipping label URLs:', labelUrls);
+
+        if (!labelUrls) {
+            alert('No shipping label URL found for this Item Fulfillment.');
+            return;
+        }
+
         const domain = url.resolveDomain({
             hostType: url.HostType.APPLICATION,
             accountId: runtime.accountId
         });
-        // Handle both new ||| delimiter and legacy comma delimiter for backward compatibility
-        // New format uses ||| because FedEx URLs contain commas
-        // Legacy format used comma but only works for File Cabinet URLs (not FedEx URLs)
+
+        // Handle both ||| delimiter and legacy comma delimiter
         let urls;
         if (labelUrls.indexOf('|||') !== -1) {
-            // New format with ||| delimiter
             urls = labelUrls.split('|||');
         } else {
-            // Legacy comma delimiter (only safe for File Cabinet URLs)
             urls = labelUrls.split(',');
         }
+
         if(urls.length === 1 && urls[0] === '') {
-            alert('No FedEx label URL found for this Item Fulfillment.');
+            alert('No shipping label URL found for this Item Fulfillment.');
             return;
         }
+
         urls.forEach((labelUrl) => {
-            if(labelUrl === '') return; // skip empty URLs
-            // Handle both File Cabinet URLs (relative) and FedEx URLs (absolute)
+            if(labelUrl === '') return;
             const fullUrl = labelUrl.startsWith('http') ? labelUrl : domain + labelUrl;
-            console.log('FedEx label URL:', fullUrl);
-            printNodeLib.printByPrintNode('Print Fedex Label from NS', fullUrl, 'FedEx Label', 1);
+            console.log('Label URL:', fullUrl);
+            printNodeLib.printByPrintNode('Print ' + reportType + ' from NS', fullUrl, reportType, 1);
         });
-        alert('FedEx label(s) sent to the printer.');
+        alert('Shipping label(s) sent to the printer.');
     }
 
     function pageInit() {
@@ -478,6 +498,59 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
         }
     }
 
+    /**
+     * Re-create UPS shipment (creates new tracking number and label)
+     * Calls a server-side Suitelet because upsHelper requires server-only modules (N/encode)
+     * Use with caution - this creates a completely new shipment
+     */
+    function conPsRecreateUPSShipment() {
+        const confirmed = confirm(
+            '⚠️ WARNING: This will create a NEW UPS shipment with a NEW tracking number.\n\n' +
+            'The previous shipment will still exist in UPS\'s system.\n\n' +
+            'Only use this if:\n' +
+            '• The original shipment failed completely, OR\n' +
+            '• You need to void and recreate the shipment\n\n' +
+            'Are you sure you want to continue?'
+        );
+        if (!confirmed) return;
+
+        try {
+            const ifId = currentRecord.get().id;
+            console.log('Re-creating UPS shipment for Item Fulfillment:', ifId);
+
+            // Call the UPS Re-create Suitelet (server-side) since upsHelper uses N/encode
+            const suiteletUrl = url.resolveScript({
+                scriptId: 'customscript_hyc_ups_recreate_shipment',
+                deploymentId: 'customdeploy_hyc_ups_recreate_shipment',
+                params: { ifid: ifId }
+            });
+
+            console.log('Calling UPS Re-create Suitelet:', suiteletUrl);
+
+            const response = https.get({
+                url: suiteletUrl
+            });
+
+            console.log('Suitelet response:', response.body);
+
+            if (response.code === 200) {
+                const result = JSON.parse(response.body);
+
+                if (result.success) {
+                    alert('UPS Shipment created successfully!\n\nTracking Number: ' + (result.trackingNumber || 'See record'));
+                    location.reload();
+                } else {
+                    alert('UPS Shipment creation failed:\n\n' + (result.message || 'Unknown error'));
+                }
+            } else {
+                alert('UPS Shipment creation failed:\n\nHTTP Error ' + response.code);
+            }
+        } catch (e) {
+            console.error('Re-create UPS shipment error:', e);
+            alert('Error re-creating UPS shipment: ' + e.message);
+        }
+    }
+
     return {
         pageInit,
         conPsEnterPro,
@@ -486,8 +559,9 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
         conPsPrintUCC,
         conPsPrintPackSlip,
         printPackingSlipWithApi,
-        conPsPrintFedexLabel,
+        conPsPrintSmallParcelLabel,
         conPsRetryLabelDownload,
-        conPsRecreateShipment
+        conPsRecreateShipment,
+        conPsRecreateUPSShipment
     };
 });

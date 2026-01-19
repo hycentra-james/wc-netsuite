@@ -16,7 +16,8 @@ define(['N/https','N/log'],
             'PACKING_SLIP': 'Packing Slip',
             'BILL_OF_LADING': 'Bill of Lading',
             'UCC_LABEL': 'UCC Label',
-            'FEDEX_LABEL': 'FedEx Label'
+            'FEDEX_LABEL': 'FedEx Label',
+            'UPS_LABEL': 'UPS Label'
         };
         const PRINTER = {
             SHARP_MX_5070_2: '74452670',
@@ -31,8 +32,8 @@ define(['N/https','N/log'],
                 return PRINTER.HP_E826_WAREHOUSE;
             } else if (reportType === REPORT_TYPE.UCC_LABEL) {
                 return PRINTER.UPS_ZP_450_2;//return PRINTER.UPS_WORLDSHIP;
-            } else if (reportType === REPORT_TYPE.FEDEX_LABEL) {
-                return PRINTER.UPS_SMALLPARCELWH2; // FedEx labels routed to small parcel printer
+            } else if (reportType === REPORT_TYPE.FEDEX_LABEL || reportType === REPORT_TYPE.UPS_LABEL) {
+                return PRINTER.UPS_SMALLPARCELWH2; // FedEx and UPS labels routed to small parcel printer
             } else {
                 throw new Error('Invalid report type: ' + reportType);
             }
@@ -45,7 +46,7 @@ define(['N/https','N/log'],
             const payload = {
                 printerId: getPrinterByReportType(reportType),
                 title: title,
-                contentType: reportType === REPORT_TYPE.FEDEX_LABEL ? 'raw_uri' : 'pdf_uri' ,
+                contentType: (reportType === REPORT_TYPE.FEDEX_LABEL || reportType === REPORT_TYPE.UPS_LABEL) ? 'raw_uri' : 'pdf_uri' ,
                 content: content,
                 qty: qty
             };

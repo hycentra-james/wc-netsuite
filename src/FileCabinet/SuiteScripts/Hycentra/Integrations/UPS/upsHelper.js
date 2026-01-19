@@ -13,17 +13,32 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         const WC_UPS_MAPPING_RECORD_ID = 11; // HYC Shipping Label Mapping List (Default Account)
         const WC_PHONE_NUMBER = '9097731777';
 
+        // Pottery Barn return label configuration
+        const POTTERY_BARN_CUSTOMER_ID = 1419;
+        const PB_RETURN_ADDRESS = {
+            Name: 'Williams Sonoma',
+            AttentionName: 'PH1DTC',
+            Address: {
+                AddressLine: ['7755 Polk Lane'],
+                City: 'Olive Branch',
+                StateProvinceCode: 'MS',
+                PostalCode: '38654-7532',
+                CountryCode: 'US'
+            }
+        };
+
         // Module-level variable to store test mode flag
-        var IS_TEST_MODE = false;
+        // Auto-detect based on NetSuite environment (sandbox vs production)
+        var IS_TEST_MODE = (runtime.envType === runtime.EnvType.SANDBOX);
 
         /**
-         * Set test mode flag
+         * Set test mode flag (overrides auto-detected environment)
          *
          * @param {boolean} testMode Whether to use sandbox configuration
          */
         function setTestMode(testMode) {
             IS_TEST_MODE = testMode;
-            log.debug('UPS Test Mode', 'Test mode set to: ' + IS_TEST_MODE);
+            log.debug('UPS Test Mode', 'Test mode manually set to: ' + IS_TEST_MODE);
         }
 
         /**
@@ -50,6 +65,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {string} The URL string
          */
         function getApiUrl() {
+            // Define URLs at the top for clarity
+            var SANDBOX_URL = 'https://wwwcie.ups.com/';
+            var PRODUCTION_URL = 'https://onlinetools.ups.com/';
+
             try {
                 var configRecordId = getCurrentConfigRecordId();
                 log.debug('DEBUG', 'getApiUrl()::IS_TEST_MODE = ' + IS_TEST_MODE + ', using config record ID = ' + configRecordId);
@@ -61,21 +80,33 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 if (!tokenRecord.isEmpty) {
                     var endpoint = tokenRecord.getValue({ fieldId: 'custrecord_hyc_ups_endpoint' });
+
+                    // If no endpoint configured, use appropriate default based on test mode
+                    if (!endpoint) {
+                        endpoint = IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                        log.debug('DEBUG', 'No endpoint configured, using default: ' + endpoint);
+                    }
+
                     // Ensure endpoint ends with trailing slash
                     if (endpoint && !endpoint.endsWith('/')) {
                         endpoint = endpoint + '/';
                         log.debug('DEBUG', 'Added trailing slash to endpoint: ' + endpoint);
                     }
-                    return endpoint || 'https://onlinetools.ups.com/';
+
+                    log.debug('DEBUG', 'getApiUrl()::returning endpoint = ' + endpoint);
+                    return endpoint;
                 } else {
-                    return 'https://onlinetools.ups.com/'; // Production endpoint
+                    var defaultUrl = IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                    log.debug('DEBUG', 'Empty token record, using default: ' + defaultUrl);
+                    return defaultUrl;
                 }
             } catch (e) {
                 log.error({
                     title: 'ERROR',
                     details: 'Error getting API URL, using default: ' + e.message
                 });
-                return 'https://onlinetools.ups.com/'; // Fallback to production
+                // Fallback based on test mode
+                return IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
             }
         }
 
@@ -482,6 +513,45 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Check if the fulfillment is for a Pottery Barn order
+         * Pottery Barn orders require a return label to be created alongside the outbound label
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @returns {boolean} True if this is a Pottery Barn order
+         */
+        function isPotteryBarnOrder(fulfillmentRecord) {
+            try {
+                var customerId = fulfillmentRecord.getValue({ fieldId: 'entity' });
+                log.debug('isPotteryBarnOrder', 'Customer ID: ' + customerId + ', Pottery Barn ID: ' + POTTERY_BARN_CUSTOMER_ID);
+
+                if (customerId == POTTERY_BARN_CUSTOMER_ID) {
+                    log.debug('isPotteryBarnOrder', 'This is a Pottery Barn order');
+                    return true;
+                }
+
+                // Also check parent customer (in case of sub-customer)
+                try {
+                    var customerRecord = record.load({
+                        type: record.Type.CUSTOMER,
+                        id: customerId
+                    });
+                    var parentCustomerId = customerRecord.getValue({ fieldId: 'parent' });
+                    if (parentCustomerId == POTTERY_BARN_CUSTOMER_ID) {
+                        log.debug('isPotteryBarnOrder', 'Parent customer is Pottery Barn');
+                        return true;
+                    }
+                } catch (customerError) {
+                    log.debug('isPotteryBarnOrder', 'Could not load customer record: ' + customerError.message);
+                }
+
+                return false;
+            } catch (e) {
+                log.error('isPotteryBarnOrder Error', 'Error checking Pottery Barn order: ' + e.message);
+                return false;
+            }
+        }
+
+        /**
          * Extract sequence number from carton name (e.g., "SO206966-1" -> "1")
          *
          * @param {string} cartonName The carton name (e.g., "SO206966-1")
@@ -812,21 +882,24 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {string} salesOrderNumber The sales order number for filename
          * @param {number} packageSequenceNumber The package sequence number
          * @param {string} labelFormat The label format (ZPL, GIF, PNG)
+         * @param {boolean} [isReturnLabel=false] Whether this is a return label (adds RETURN_ prefix)
          * @returns {string} File URL if successful, null if failed
          */
-        function saveUPSLabel(base64Data, salesOrderNumber, packageSequenceNumber, labelFormat) {
+        function saveUPSLabel(base64Data, salesOrderNumber, packageSequenceNumber, labelFormat, isReturnLabel) {
             try {
                 log.debug('DEBUG', 'saveUPSLabel()::salesOrderNumber = ' + salesOrderNumber);
                 log.debug('DEBUG', 'saveUPSLabel()::packageSequenceNumber = ' + packageSequenceNumber);
                 log.debug('DEBUG', 'saveUPSLabel()::labelFormat = ' + labelFormat);
+                log.debug('DEBUG', 'saveUPSLabel()::isReturnLabel = ' + isReturnLabel);
 
                 var dateStr = getCurrentDateForFilename();
                 var extension = labelFormat === 'ZPL' ? '.zpl' : (labelFormat === 'GIF' ? '.gif' : '.png');
-                var fileName = dateStr + '_' + salesOrderNumber + '_' + packageSequenceNumber + extension;
+                var suffix = isReturnLabel ? '_RETURN' : '';
+                var fileName = dateStr + '_' + salesOrderNumber + '_' + packageSequenceNumber + suffix + extension;
 
                 log.debug('DEBUG', 'saveUPSLabel()::fileName = ' + fileName);
 
-                // Get or create UPS labels folder
+                // Get or create UPS labels folder (return labels now use same folder with _RETURN suffix)
                 var folderId = getUPSLabelFolderId();
 
                 var labelFile;
@@ -844,6 +917,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     labelFile = file.create({
                         name: fileName,
                         fileType: file.Type.PLAINTEXT,
+                        isOnline: true,
                         contents: decodedZpl,
                         folder: folderId
                     });
@@ -854,6 +928,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     labelFile = file.create({
                         name: fileName,
                         fileType: fileType,
+                        isOnline: true,
                         contents: base64Data,
                         encoding: file.Encoding.BASE_64,
                         folder: folderId
@@ -927,11 +1002,21 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     return;
                 }
 
+                // Skip printing in sandbox/test mode
+                if (IS_TEST_MODE) {
+                    log.debug('Print UPS Labels', 'Skipping print - Test mode enabled. ' + labelUrls.length + ' label(s) would be printed.');
+                    return;
+                }
+
                 log.debug('Print UPS Labels', 'Printing ' + labelUrls.length + ' labels');
 
                 for (var i = 0; i < labelUrls.length; i++) {
                     try {
-                        printNodeLib.printLabel(labelUrls[i]);
+                        printNodeLib.printByPrintNode(
+                            'UPS Label ' + (i + 1),
+                            labelUrls[i],
+                            printNodeLib.REPORT_TYPE.UPS_LABEL
+                        );
                         log.debug('Print UPS Label', 'Printed label: ' + labelUrls[i]);
                     } catch (printError) {
                         log.error('Print UPS Label Error', 'Failed to print label ' + labelUrls[i] + ': ' + printError.message);
@@ -948,8 +1033,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          *
          * @param {string} fulfillmentId The Item Fulfillment record ID
          * @param {Object} upsResponse The complete UPS API response
+         * @param {string} labelUrlString Optional - pipe-delimited label URLs to store
          */
-        function updateMultiplePackageTrackingNumbers(fulfillmentId, upsResponse) {
+        function updateMultiplePackageTrackingNumbers(fulfillmentId, upsResponse, labelUrlString) {
             try {
                 log.debug('Multiple Tracking Update', 'Starting tracking update for fulfillment: ' + fulfillmentId);
 
@@ -992,6 +1078,22 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                     log.debug('Tracking Update', 'Package ' + (i + 1) + ': ' + trackingNumber);
                 }
+
+                // Also set the shipping label URL if provided
+                if (labelUrlString) {
+                    recordForUpdate.setValue({
+                        fieldId: 'custbody_shipping_label_url',
+                        value: labelUrlString
+                    });
+                    log.debug('Label URL Update', 'Setting custbody_shipping_label_url: ' + labelUrlString);
+                }
+
+                // Set ship status to Shipped (C)
+                recordForUpdate.setValue({
+                    fieldId: 'shipstatus',
+                    value: 'C'  // C = Shipped
+                });
+                log.debug('Ship Status Update', 'Setting shipstatus to C (Shipped)');
 
                 recordForUpdate.save();
                 log.debug('Multiple Tracking Success', 'Updated ' + Math.min(packageCount, packageResults.length) + ' tracking numbers');
@@ -1200,6 +1302,134 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Process reference value - handles formula substitution like {fieldname}
+         * Retrieves field values from the Sales Order linked to the fulfillment
+         *
+         * @param {string} referenceValue The reference value (may contain {fieldname} formulas)
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @returns {string} Processed reference value with formulas replaced
+         */
+        function processReferenceValue(referenceValue, fulfillmentRecord) {
+            try {
+                if (!referenceValue) {
+                    return '';
+                }
+
+                // Check if value contains formula syntax {fieldname}
+                var formulaMatch = referenceValue.match(/^\{(.+)\}$/);
+                if (!formulaMatch) {
+                    // No formula, return as-is
+                    return referenceValue;
+                }
+
+                var fieldName = formulaMatch[1];
+                log.debug('processReferenceValue', 'Found formula field: ' + fieldName);
+
+                // Try to get value from fulfillment record first
+                try {
+                    var fulfillmentValue = fulfillmentRecord.getValue({ fieldId: fieldName });
+                    if (fulfillmentValue) {
+                        log.debug('processReferenceValue', 'Found value on fulfillment: ' + fulfillmentValue);
+                        return String(fulfillmentValue);
+                    }
+                } catch (e) {
+                    // Field not on fulfillment, try Sales Order
+                }
+
+                // Get linked Sales Order and retrieve value
+                var createdFromId = fulfillmentRecord.getValue({ fieldId: 'createdfrom' });
+                if (createdFromId) {
+                    try {
+                        var salesOrderRecord = record.load({
+                            type: record.Type.SALES_ORDER,
+                            id: createdFromId
+                        });
+
+                        var soValue = salesOrderRecord.getValue({ fieldId: fieldName });
+                        if (soValue) {
+                            log.debug('processReferenceValue', 'Found value on Sales Order: ' + soValue);
+                            return String(soValue);
+                        }
+                    } catch (soError) {
+                        log.debug('processReferenceValue', 'Could not load Sales Order or field: ' + soError.message);
+                    }
+                }
+
+                // Field not found, return empty
+                log.debug('processReferenceValue', 'Field "' + fieldName + '" not found, returning empty');
+                return '';
+
+            } catch (e) {
+                log.error('processReferenceValue Error', 'Error processing reference value: ' + e.message);
+                return referenceValue || '';
+            }
+        }
+
+        /**
+         * Build customer references array for UPS payload
+         * Sources values from custrecord_hyc_ship_lbl_customer_ref_1 and custrecord_hyc_ship_lbl_customer_ref_2
+         *
+         * UPS Reference Number format:
+         * - Code "00" = Customer Reference (or other codes like "01" = P.O. Number, "02" = Invoice Number)
+         *
+         * @param {Object} mappingRecord The shipping label mapping record
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @returns {Array|null} Array of UPS ReferenceNumber objects or null if none
+         */
+        function buildCustomerReferences(mappingRecord, fulfillmentRecord) {
+            try {
+                if (!mappingRecord) {
+                    log.debug('buildCustomerReferences', 'No mapping record, skipping references');
+                    return null;
+                }
+
+                var references = [];
+
+                // Get reference values from mapping record
+                var ref1 = mappingRecord.getValue('custrecord_hyc_ship_lbl_customer_ref_1');
+                var ref2 = mappingRecord.getValue('custrecord_hyc_ship_lbl_customer_ref_2');
+
+                log.debug('buildCustomerReferences', 'Raw ref1: ' + ref1 + ', ref2: ' + ref2);
+
+                // Process reference 1
+                if (ref1) {
+                    var processedRef1 = processReferenceValue(ref1, fulfillmentRecord);
+                    if (processedRef1) {
+                        references.push({
+                            Code: '00', // Customer Reference
+                            Value: processedRef1.substring(0, 35) // UPS max length is 35 characters
+                        });
+                        log.debug('buildCustomerReferences', 'Added reference 1: ' + processedRef1);
+                    }
+                }
+
+                // Process reference 2
+                if (ref2) {
+                    var processedRef2 = processReferenceValue(ref2, fulfillmentRecord);
+                    if (processedRef2) {
+                        references.push({
+                            Code: '00', // Customer Reference
+                            Value: processedRef2.substring(0, 35) // UPS max length is 35 characters
+                        });
+                        log.debug('buildCustomerReferences', 'Added reference 2: ' + processedRef2);
+                    }
+                }
+
+                if (references.length === 0) {
+                    log.debug('buildCustomerReferences', 'No references to add');
+                    return null;
+                }
+
+                log.debug('buildCustomerReferences', 'Built ' + references.length + ' references');
+                return references;
+
+            } catch (e) {
+                log.error('buildCustomerReferences Error', 'Error building customer references: ' + e.message);
+                return null;
+            }
+        }
+
+        /**
          * Build UPS Payment Information section
          * Supports both BillShipper (default) and BillThirdParty
          *
@@ -1212,25 +1442,38 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         function buildPaymentInformation(isBillToThirdParty, mappingRecord, wcAccountNumber, thirdPartyAccountNumber) {
             try {
                 if (isBillToThirdParty && mappingRecord) {
-                    // Get third party billing address from mapping
+                    log.debug('DEBUG', 'buildPaymentInformation()::IS_TEST_MODE = ' + IS_TEST_MODE);
+                    log.debug('DEBUG', 'buildPaymentInformation()::thirdPartyAccountNumber = ' + thirdPartyAccountNumber);
+
+                    // In test mode, fall back to BillShipper because UPS rejects
+                    // BillThirdParty when the account is the same as ShipperNumber
+                    if (IS_TEST_MODE) {
+                        log.debug('DEBUG', 'buildPaymentInformation()::Test mode - using BillShipper instead of BillThirdParty');
+                        return {
+                            ShipmentCharge: {
+                                Type: '01',
+                                BillShipper: {
+                                    AccountNumber: wcAccountNumber
+                                }
+                            }
+                        };
+                    }
+
+                    // Production mode: Use actual third party billing
                     var thirdPartyBillAddrJson = mappingRecord.getValue('custrecord_hyc_ship_lbl_3p_bill_addr');
                     log.debug('DEBUG', 'buildPaymentInformation()::thirdPartyBillAddrJson = ' + thirdPartyBillAddrJson);
 
                     if (thirdPartyBillAddrJson) {
                         var thirdPartyInfo = JSON.parse(thirdPartyBillAddrJson);
 
-                        log.debug('DEBUG', 'buildPaymentInformation()::IS_TEST_MODE = ' + IS_TEST_MODE);
                         log.debug('DEBUG', 'buildPaymentInformation()::Using BillThirdParty with account: ' + thirdPartyAccountNumber);
-
-                        // In test mode, use WC account; in production, use third party account
-                        var billingAccount = IS_TEST_MODE ? wcAccountNumber : thirdPartyAccountNumber;
 
                         // UPS BillThirdParty structure (ShipmentCharge is an object, not array)
                         return {
                             ShipmentCharge: {
                                 Type: '01', // Transportation charges
                                 BillThirdParty: {
-                                    AccountNumber: billingAccount,
+                                    AccountNumber: thirdPartyAccountNumber,
                                     Address: {
                                         PostalCode: thirdPartyInfo.address ? thirdPartyInfo.address.postalCode : '',
                                         CountryCode: thirdPartyInfo.address ? thirdPartyInfo.address.countryCode : 'US'
@@ -1314,6 +1557,10 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 // Get reference numbers
                 var tranId = fulfillmentRecord.getValue({ fieldId: 'tranid' }) || '';
 
+                // Build customer references from mapping record
+                var customerReferences = buildCustomerReferences(mappingRecord, fulfillmentRecord);
+                log.debug('buildShipmentPayload', 'Customer references: ' + JSON.stringify(customerReferences));
+
                 // Build packages from PackShip records (same approach as FedEx)
                 var packages = [];
                 var packshipRecords = searchPackShipRecords(fulfillmentRecord.id);
@@ -1329,7 +1576,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         var cartonId = cartonKeys[c];
                         var cartonData = calculateCartonData(cartonGroups[cartonId]);
 
-                        packages.push({
+                        var packageObj = {
                             Description: 'Package ' + (c + 1) + ' - ' + cartonId,
                             Packaging: {
                                 Code: '02',
@@ -1351,7 +1598,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 },
                                 Weight: String(cartonData.weight)
                             }
-                        });
+                        };
+
+                        // Add customer references if available
+                        if (customerReferences && customerReferences.length > 0) {
+                            packageObj.ReferenceNumber = customerReferences;
+                        }
+
+                        packages.push(packageObj);
                     }
                 }
 
@@ -1367,7 +1621,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             line: i
                         })) || 1;
 
-                        packages.push({
+                        var fallbackPackageObj = {
                             Description: 'Package ' + (i + 1),
                             Packaging: {
                                 Code: '02',
@@ -1389,13 +1643,20 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 },
                                 Weight: String(weight)
                             }
-                        });
+                        };
+
+                        // Add customer references if available
+                        if (customerReferences && customerReferences.length > 0) {
+                            fallbackPackageObj.ReferenceNumber = customerReferences;
+                        }
+
+                        packages.push(fallbackPackageObj);
                     }
                 }
 
                 // If still no packages, create a default one
                 if (packages.length === 0) {
-                    packages.push({
+                    var defaultPackageObj = {
                         Description: 'Package 1',
                         Packaging: {
                             Code: '02',
@@ -1417,7 +1678,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             },
                             Weight: '1'
                         }
-                    });
+                    };
+
+                    // Add customer references if available
+                    if (customerReferences && customerReferences.length > 0) {
+                        defaultPackageObj.ReferenceNumber = customerReferences;
+                    }
+
+                    packages.push(defaultPackageObj);
                 }
 
                 // Build the ShipmentRequest payload
@@ -1481,15 +1749,283 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Build UPS Return Shipment payload for Pottery Barn orders
+         * Uses UPS Print Return Label (PRL) service - Return Service Code '9'
+         * For returns: Customer becomes Shipper, Williams Sonoma becomes ShipTo
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} outboundRecipientInfo The original recipient (customer) info
+         * @param {Array} packages The packages array from outbound shipment
+         * @returns {Object} UPS Return ShipmentRequest payload
+         */
+        /**
+         * Build UPS Return Shipment payload for a SINGLE package
+         * UPS Print Return Label only allows one package per shipment
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} outboundRecipientInfo The original recipient (customer) info
+         * @param {Object} singlePackage A single package object from the outbound shipment
+         * @param {number} packageSequenceNumber The package sequence number (1-based)
+         * @returns {Object} The return shipment payload
+         */
+        function buildReturnShipmentPayload(fulfillmentRecord, outboundRecipientInfo, singlePackage, packageSequenceNumber) {
+            try {
+                log.debug('buildReturnShipmentPayload', 'Building return shipment payload for package ' + packageSequenceNumber);
+
+                // Get WC account number from config (still bill to WC)
+                var tokenRecord = getTokenRecord();
+                var wcAccountNumber = tokenRecord.getValue({ fieldId: 'custrecord_hyc_ups_account_number' });
+
+                var tranId = fulfillmentRecord.getValue({ fieldId: 'tranid' }) || '';
+
+                // Build single package for return (UPS Print Return Label only allows 1 package)
+                var returnPackage = {
+                    Description: 'Return Package ' + packageSequenceNumber,
+                    Packaging: singlePackage.Packaging,
+                    Dimensions: singlePackage.Dimensions,
+                    PackageWeight: singlePackage.PackageWeight
+                    // Note: No ReferenceNumber for return labels
+                };
+
+                // Build the Return ShipmentRequest payload
+                // For returns: addresses are swapped
+                // - Shipper = Customer (return is coming FROM the customer)
+                // - ShipTo = Williams Sonoma return center
+                // - ShipFrom = Customer (origin of return)
+                var payload = {
+                    ShipmentRequest: {
+                        Request: {
+                            RequestOption: 'nonvalidate',
+                            SubVersion: '1901',
+                            TransactionReference: {
+                                CustomerContext: 'Return-' + tranId + '-Pkg' + packageSequenceNumber
+                            }
+                        },
+                        Shipment: {
+                            Description: 'Return Shipment for ' + tranId + ' Package ' + packageSequenceNumber,
+                            ReturnService: {
+                                Code: '9',
+                                Description: 'UPS Print Return Label'
+                            },
+                            // Customer becomes the shipper (returning from)
+                            Shipper: {
+                                Name: outboundRecipientInfo.Name || 'Customer',
+                                AttentionName: outboundRecipientInfo.AttentionName || outboundRecipientInfo.Name || 'Customer',
+                                Phone: outboundRecipientInfo.Phone || { Number: '9999999999' },
+                                ShipperNumber: wcAccountNumber, // Still bill to WC account
+                                Address: outboundRecipientInfo.Address
+                            },
+                            // Williams Sonoma return center is the destination
+                            ShipTo: {
+                                Name: PB_RETURN_ADDRESS.Name,
+                                AttentionName: PB_RETURN_ADDRESS.AttentionName,
+                                Phone: PB_RETURN_ADDRESS.Phone,
+                                Address: PB_RETURN_ADDRESS.Address
+                            },
+                            // ShipFrom is also the customer
+                            ShipFrom: {
+                                Name: outboundRecipientInfo.Name || 'Customer',
+                                AttentionName: outboundRecipientInfo.AttentionName || outboundRecipientInfo.Name || 'Customer',
+                                Phone: outboundRecipientInfo.Phone || { Number: '9999999999' },
+                                Address: outboundRecipientInfo.Address
+                            },
+                            // Bill to WC account
+                            PaymentInformation: {
+                                ShipmentCharge: {
+                                    Type: '01',
+                                    BillShipper: {
+                                        AccountNumber: wcAccountNumber
+                                    }
+                                }
+                            },
+                            Service: {
+                                Code: '03', // UPS Ground for returns
+                                Description: 'UPS Ground'
+                            },
+                            Package: returnPackage
+                        },
+                        LabelSpecification: {
+                            LabelImageFormat: {
+                                Code: 'ZPL',
+                                Description: 'ZPL'
+                            },
+                            LabelStockSize: {
+                                Height: '6',
+                                Width: '4'
+                            }
+                        }
+                    }
+                };
+
+                log.debug('buildReturnShipmentPayload', 'Return payload built successfully for package ' + packageSequenceNumber);
+                return payload;
+
+            } catch (e) {
+                log.error('buildReturnShipmentPayload Error', 'Error building return shipment payload: ' + e.message);
+                throw e;
+            }
+        }
+
+        /**
+         * Create UPS Return Shipment via API for Pottery Barn orders
+         * UPS Print Return Label only allows one package per shipment
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} outboundRecipientInfo The original recipient (customer) info
+         * @param {Object} singlePackage A single package object from outbound shipment
+         * @param {number} packageSequenceNumber The package sequence number (1-based)
+         * @returns {Object} Result with success, trackingNumber, labelUrls, etc.
+         */
+        function createReturnShipment(fulfillmentRecord, outboundRecipientInfo, singlePackage, packageSequenceNumber) {
+            try {
+                log.audit('createReturnShipment', 'Creating return shipment for Pottery Barn order, package ' + packageSequenceNumber);
+
+                // Build return shipment payload for single package
+                var payload = buildReturnShipmentPayload(fulfillmentRecord, outboundRecipientInfo, singlePackage, packageSequenceNumber);
+
+                // Get authentication token and API URL
+                var tokenRecord = getTokenRecord();
+                var bearerToken = tokenRecord.getValue({ fieldId: 'custrecord_hyc_ups_access_token' });
+                var baseApiUrl = getApiUrl();
+
+                if (!baseApiUrl.endsWith('/')) {
+                    baseApiUrl = baseApiUrl + '/';
+                }
+
+                // UPS Shipping API endpoint
+                var apiUrl = baseApiUrl + 'api/shipments/v2409/ship';
+
+                log.debug('createReturnShipment', 'API URL: ' + apiUrl);
+                log.debug('createReturnShipment', 'Return Payload: ' + JSON.stringify(payload));
+
+                // Make the API call
+                var response = postToApi(bearerToken, apiUrl, JSON.stringify(payload));
+
+                log.debug('createReturnShipment', 'Response Status: ' + response.status);
+                log.debug('createReturnShipment', 'Response: ' + JSON.stringify(response.result));
+
+                // Process response
+                if (response.status === 200 || response.status === 201) {
+                    var returnResult = processReturnShipmentResponse(fulfillmentRecord, response.result, packageSequenceNumber);
+
+                    log.audit('createReturnShipment Success', 'Return shipment created for package ' + packageSequenceNumber + '. Tracking: ' + returnResult.trackingNumber);
+
+                    return {
+                        success: true,
+                        trackingNumber: returnResult.trackingNumber,
+                        labelUrl: returnResult.labelUrl,
+                        labelData: returnResult.labelData,
+                        packageSequenceNumber: packageSequenceNumber
+                    };
+                } else {
+                    log.error('createReturnShipment Error', 'UPS API returned status ' + response.status + ' for package ' + packageSequenceNumber);
+                    return {
+                        success: false,
+                        message: 'UPS Return API returned status ' + response.status,
+                        packageSequenceNumber: packageSequenceNumber
+                    };
+                }
+
+            } catch (e) {
+                log.error('createReturnShipment Error', 'Error creating return shipment: ' + e.message);
+                return {
+                    success: false,
+                    message: e.message
+                };
+            }
+        }
+
+        /**
+         * Process UPS Return Shipment Response for a SINGLE package
+         * Saves return label and returns tracking/label info
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @param {Object} apiResponse The UPS API response
+         * @param {number} packageSequenceNumber The package sequence number (1-based)
+         * @returns {Object} Processed result with trackingNumber and labelUrl
+         */
+        function processReturnShipmentResponse(fulfillmentRecord, apiResponse, packageSequenceNumber) {
+            try {
+                log.debug('processReturnShipmentResponse', 'Processing UPS return shipment response for package ' + packageSequenceNumber);
+
+                var trackingNumber = '';
+                var labelData = '';
+                var labelUrl = '';
+
+                // UPS response structure: ShipmentResponse.ShipmentResults
+                if (apiResponse.ShipmentResponse && apiResponse.ShipmentResponse.ShipmentResults) {
+                    var shipmentResults = apiResponse.ShipmentResponse.ShipmentResults;
+
+                    // Get master tracking number
+                    if (shipmentResults.ShipmentIdentificationNumber) {
+                        trackingNumber = shipmentResults.ShipmentIdentificationNumber;
+                    }
+
+                    // Get package results (should be single package)
+                    if (shipmentResults.PackageResults) {
+                        var pkgResults = Array.isArray(shipmentResults.PackageResults)
+                            ? shipmentResults.PackageResults
+                            : [shipmentResults.PackageResults];
+
+                        var tranId = fulfillmentRecord.getValue({ fieldId: 'tranid' }) || 'IF' + fulfillmentRecord.id;
+
+                        // Process the single package result
+                        var pkg = pkgResults[0];
+                        if (pkg) {
+                            var pkgTrackingNumber = pkg.TrackingNumber || '';
+
+                            // Get label image (base64 encoded)
+                            if (pkg.ShippingLabel && pkg.ShippingLabel.GraphicImage) {
+                                labelData = pkg.ShippingLabel.GraphicImage;
+                            }
+
+                            // Use package tracking as master if not set
+                            if (!trackingNumber && pkgTrackingNumber) {
+                                trackingNumber = pkgTrackingNumber;
+                            }
+
+                            // Save return label to file cabinet with _RETURN suffix using original package sequence number
+                            if (labelData) {
+                                labelUrl = saveUPSLabel(
+                                    labelData,
+                                    tranId,
+                                    packageSequenceNumber,
+                                    'ZPL',
+                                    true // isReturnLabel
+                                );
+                            }
+                        }
+                    }
+                }
+
+                log.debug('processReturnShipmentResponse', 'Return Tracking: ' + trackingNumber + ', Label URL: ' + labelUrl);
+
+                return {
+                    trackingNumber: trackingNumber,
+                    labelData: labelData,
+                    labelUrl: labelUrl
+                };
+
+            } catch (e) {
+                log.error('processReturnShipmentResponse Error', 'Error processing return response: ' + e.message);
+                return {
+                    trackingNumber: '',
+                    labelData: '',
+                    labelUrls: []
+                };
+            }
+        }
+
+        /**
          * Create UPS Shipment via API
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
          * @param {boolean} testMode If true, only validates but doesn't save to record
          * @returns {Object} Result with success, trackingNumber, labelData, etc.
          */
-        function createShipment(fulfillmentRecord, testMode) {
+        function createShipment(fulfillmentRecord) {
             var startTime = Date.now();
-            log.debug('createShipment', 'Starting shipment creation for fulfillment: ' + fulfillmentRecord.id);
+            log.debug('createShipment', 'Starting shipment creation for fulfillment: ' + fulfillmentRecord.id + ' (IS_TEST_MODE=' + IS_TEST_MODE + ')');
 
             try {
                 // Build the shipment payload
@@ -1519,19 +2055,122 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 // Process response
                 if (response.status === 200 || response.status === 201) {
-                    var result = processShipmentResponse(fulfillmentRecord, response.result, testMode);
+                    var result = processShipmentResponse(fulfillmentRecord, response.result);
 
                     var executionTime = Date.now() - startTime;
                     log.audit('createShipment Success', 'Shipment created in ' + executionTime + 'ms. Tracking: ' + result.trackingNumber);
 
-                    return {
+                    var finalResult = {
                         success: true,
-                        message: 'UPS shipment created successfully' + (testMode ? ' (Test Mode)' : ''),
+                        message: 'UPS shipment created successfully' + (IS_TEST_MODE ? ' (Test Mode)' : ''),
                         trackingNumber: result.trackingNumber,
                         labelData: result.labelData,
                         apiResponse: response.result,
                         executionTime: executionTime
                     };
+
+                    // For Pottery Barn orders, create return labels (one per package)
+                    // UPS Print Return Label only allows one package per shipment
+                    // Return labels are created in both sandbox and production modes
+                    if (isPotteryBarnOrder(fulfillmentRecord)) {
+                        log.audit('createShipment', 'Pottery Barn order detected - creating return labels');
+
+                        try {
+                            // Get recipient info and packages from the payload
+                            var recipientInfo = buildRecipientInfo(fulfillmentRecord);
+                            var packages = payload.ShipmentRequest.Shipment.Package;
+
+                            // Ensure packages is an array
+                            if (!Array.isArray(packages)) {
+                                packages = [packages];
+                            }
+
+                            var returnTrackingNumbers = [];
+                            var returnLabelUrls = [];
+                            var returnErrors = [];
+
+                            // Create one return shipment per package
+                            for (var pkgIdx = 0; pkgIdx < packages.length; pkgIdx++) {
+                                var packageSequenceNumber = pkgIdx + 1;
+                                try {
+                                    log.debug('createShipment', 'Creating return label for package ' + packageSequenceNumber + ' of ' + packages.length);
+
+                                    var returnResult = createReturnShipment(fulfillmentRecord, recipientInfo, packages[pkgIdx], packageSequenceNumber);
+
+                                    if (returnResult.success) {
+                                        returnTrackingNumbers.push(returnResult.trackingNumber);
+                                        if (returnResult.labelUrl) {
+                                            returnLabelUrls.push(returnResult.labelUrl);
+                                        }
+                                        log.audit('createShipment', 'Return label ' + packageSequenceNumber + ' created. Tracking: ' + returnResult.trackingNumber);
+                                    } else {
+                                        log.error('createShipment', 'Failed to create return label ' + packageSequenceNumber + ': ' + returnResult.message);
+                                        returnErrors.push('Package ' + packageSequenceNumber + ': ' + returnResult.message);
+                                    }
+                                } catch (pkgReturnError) {
+                                    log.error('createShipment', 'Error creating return label ' + packageSequenceNumber + ': ' + pkgReturnError.message);
+                                    returnErrors.push('Package ' + packageSequenceNumber + ': ' + pkgReturnError.message);
+                                }
+                            }
+
+                            // Only print return labels in production mode (skip printing in test/sandbox mode)
+                            if (!IS_TEST_MODE && returnLabelUrls.length > 0) {
+                                printUPSLabels(returnLabelUrls);
+                                log.audit('createShipment', 'Printed ' + returnLabelUrls.length + ' return labels');
+                            }
+
+                            // Update custbody_shipping_label_url with return label URLs
+                            if (returnLabelUrls.length > 0) {
+                                try {
+                                    // Load current label URL value
+                                    var fulfillmentId = fulfillmentRecord.id;
+                                    var currentLabelUrl = search.lookupFields({
+                                        type: 'itemfulfillment',
+                                        id: fulfillmentId,
+                                        columns: ['custbody_shipping_label_url']
+                                    }).custbody_shipping_label_url || '';
+
+                                    // Append return label URLs
+                                    var returnLabelUrlString = returnLabelUrls.join('|||');
+                                    var combinedLabelUrls = currentLabelUrl
+                                        ? currentLabelUrl + '|||' + returnLabelUrlString
+                                        : returnLabelUrlString;
+
+                                    // Save updated value
+                                    record.submitFields({
+                                        type: 'itemfulfillment',
+                                        id: fulfillmentId,
+                                        values: {
+                                            'custbody_shipping_label_url': combinedLabelUrls
+                                        }
+                                    });
+
+                                    log.audit('createShipment', 'Updated custbody_shipping_label_url with ' + returnLabelUrls.length + ' return label URLs');
+                                } catch (urlUpdateError) {
+                                    log.error('createShipment', 'Error updating return label URLs: ' + urlUpdateError.message);
+                                }
+                            }
+
+                            // Store results
+                            if (returnTrackingNumbers.length > 0) {
+                                finalResult.returnTrackingNumbers = returnTrackingNumbers;
+                                finalResult.returnLabelUrls = returnLabelUrls;
+                                finalResult.message += ' + ' + returnTrackingNumbers.length + ' return label(s) created';
+                                log.audit('createShipment', 'Return labels created successfully. Tracking: ' + returnTrackingNumbers.join(', '));
+                            }
+
+                            if (returnErrors.length > 0) {
+                                finalResult.returnLabelErrors = returnErrors;
+                                log.error('createShipment', 'Some return labels failed: ' + returnErrors.join('; '));
+                            }
+
+                        } catch (returnError) {
+                            log.error('createShipment', 'Error creating return labels: ' + returnError.message);
+                            finalResult.returnLabelError = returnError.message;
+                        }
+                    }
+
+                    return finalResult;
                 } else {
                     throw error.create({
                         name: 'UPS_SHIP_API_ERROR',
@@ -1559,9 +2198,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {boolean} testMode If true, doesn't save to record
          * @returns {Object} Processed result with trackingNumber and labelData
          */
-        function processShipmentResponse(fulfillmentRecord, apiResponse, testMode) {
+        function processShipmentResponse(fulfillmentRecord, apiResponse) {
             try {
-                log.debug('processShipmentResponse', 'Processing UPS shipment response');
+                log.debug('processShipmentResponse', 'Processing UPS shipment response (IS_TEST_MODE=' + IS_TEST_MODE + ')');
 
                 var trackingNumber = '';
                 var labelData = '';
@@ -1612,28 +2251,39 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 log.debug('processShipmentResponse', 'Tracking: ' + trackingNumber + ', Packages: ' + packageResults.length);
 
-                // Update fulfillment record if not in test mode
-                if (!testMode && trackingNumber) {
+                // Always update fulfillment record (regardless of test mode)
+                // Labels are saved and tracking numbers updated in both sandbox and production
+                if (trackingNumber) {
                     try {
-                        // Update tracking numbers on packages
-                        if (packageResults.length > 0) {
-                            updateMultiplePackageTrackingNumbers(fulfillmentRecord.id, apiResponse);
-                        }
-
-                        // Save labels to file cabinet
+                        // Save labels to file cabinet FIRST and collect URLs
                         var tranId = fulfillmentRecord.getValue({ fieldId: 'tranid' }) || 'IF' + fulfillmentRecord.id;
+                        var labelUrls = [];
                         for (var j = 0; j < packageResults.length; j++) {
                             if (packageResults[j].LabelData) {
-                                saveUPSLabel(
+                                var labelUrl = saveUPSLabel(
                                     packageResults[j].LabelData,  // base64Data
                                     tranId,                        // salesOrderNumber/tranId for filename
                                     j + 1,                         // packageSequenceNumber
                                     'ZPL'                          // labelFormat
                                 );
+                                if (labelUrl) {
+                                    labelUrls.push(labelUrl);
+                                }
                             }
                         }
+                        var labelUrlString = labelUrls.length > 0 ? labelUrls.join('|||') : '';
 
-                        log.audit('processShipmentResponse', 'Updated fulfillment with tracking and labels');
+                        // Update tracking numbers AND label URL in ONE save operation
+                        if (packageResults.length > 0) {
+                            updateMultiplePackageTrackingNumbers(fulfillmentRecord.id, apiResponse, labelUrlString);
+                        }
+
+                        // Only print in production mode (skip printing in test/sandbox mode)
+                        if (!IS_TEST_MODE && labelUrls.length > 0) {
+                            printUPSLabels(labelUrls);
+                        }
+
+                        log.audit('processShipmentResponse', 'Updated fulfillment with tracking and ' + labelUrls.length + ' label URLs');
                     } catch (updateError) {
                         log.error('processShipmentResponse', 'Error updating fulfillment: ' + updateError.message);
                     }
@@ -1672,13 +2322,23 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getShipMethodMapping: getShipMethodMapping,
             buildShipperInfo: buildShipperInfo,
             buildRecipientInfo: buildRecipientInfo,
+            processReferenceValue: processReferenceValue,
+            buildCustomerReferences: buildCustomerReferences,
             buildShipmentPayload: buildShipmentPayload,
             createShipment: createShipment,
             processShipmentResponse: processShipmentResponse,
             saveUPSLabel: saveUPSLabel,
             getUPSLabelFolderId: getUPSLabelFolderId,
             printUPSLabels: printUPSLabels,
-            updateMultiplePackageTrackingNumbers: updateMultiplePackageTrackingNumbers
+            updateMultiplePackageTrackingNumbers: updateMultiplePackageTrackingNumbers,
+            // Pottery Barn return label functions
+            isPotteryBarnOrder: isPotteryBarnOrder,
+            buildReturnShipmentPayload: buildReturnShipmentPayload,
+            createReturnShipment: createReturnShipment,
+            processReturnShipmentResponse: processReturnShipmentResponse,
+            // Constants for external reference
+            POTTERY_BARN_CUSTOMER_ID: POTTERY_BARN_CUSTOMER_ID,
+            PB_RETURN_ADDRESS: PB_RETURN_ADDRESS
         };
     }
 );
