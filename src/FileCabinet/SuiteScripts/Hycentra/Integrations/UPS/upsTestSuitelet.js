@@ -31,12 +31,14 @@ define(['N/ui/serverWidget', 'N/record', 'N/log', './upsHelper', './upsAddressVa
                 title: 'UPS Integration Test'
             });
 
-            // Add test mode checkbox
-            form.addField({
+            // Add test mode checkbox (overrides auto-detected environment)
+            var testModeField = form.addField({
                 id: 'custpage_test_mode',
                 type: serverWidget.FieldType.CHECKBOX,
-                label: 'Use Sandbox (Test Mode)'
-            }).defaultValue = 'T';
+                label: 'Use Sandbox (Override Auto-Detection)'
+            });
+            testModeField.defaultValue = 'T';
+            testModeField.setHelpText({ help: 'When checked, uses UPS sandbox API and skips record updates/label printing. Unchecked uses production API. This overrides the auto-detected environment.' });
 
             // Add configuration status
             addConfigurationStatus(form);
@@ -373,9 +375,9 @@ define(['N/ui/serverWidget', 'N/record', 'N/log', './upsHelper', './upsAddressVa
                 var packageCount = fulfillmentRecord.getLineCount({ sublistId: 'package' });
                 results += 'Package Count: ' + packageCount + '\n\n';
 
-                // Actually create the shipment (testMode=true means don't update the fulfillment record)
-                results += 'Creating shipment in UPS sandbox...\n\n';
-                var shipmentResult = upsHelper.createShipment(fulfillmentRecord, true);
+                // Actually create the shipment (uses IS_TEST_MODE set by setTestMode above)
+                results += 'Creating shipment via UPS API (IS_TEST_MODE=' + upsHelper.getTestMode() + ')...\n\n';
+                var shipmentResult = upsHelper.createShipment(fulfillmentRecord);
 
                 if (shipmentResult.success) {
                     results += 'SUCCESS: Shipment created!\n';

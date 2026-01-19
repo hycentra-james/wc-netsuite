@@ -19,12 +19,12 @@
  *   - When for every required item the summed packed qty >= required qty, the current carton item is deemed the LAST packed item.
  * On completion:
  *   - Set Item Fulfillment checkbox 'custbody_con_packed_item_ready' = true (idempotent).
- *   - Invoke FedEx shipment creation & label print (when shipmethod is FedEx-related).
+ *   - Invoke FedEx or UPS shipment creation & label print (when shipmethod is FedEx or UPS related).
  * get the itemfulfillment id by field 'custrecord_packship_itemfulfillment'on customrecord_packship_cartonitem
  * assume all customrecord_packship_cartonitem under a shipment would under the same itemfulfillment record
  */
-define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexHelper','./Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
-    (record, search, log, fedexHelper, printNodeLib, itemFulfillmentPackageHelper) => {
+define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexHelper', '../../Hycentra/Integrations/UPS/upsHelper', './Con_Lib_Print_Node','./Con_Lib_Item_Fulfillment_Package'],
+    (record, search, log, fedexHelper, upsHelper, printNodeLib, itemFulfillmentPackageHelper) => {
         // Constants (field & record IDs)
         const REC_CARTON_ITEM = 'customrecord_packship_cartonitem';
         const REC_CARTON = 'customrecord_packship_carton';
@@ -145,7 +145,7 @@ define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexH
                     log.debug('Item Fulfillment already marked packed item ready', { ifId });
                 }
 
-                // 5. FedEx logic & printing (unchanged aside from placement)
+                // 5. FedEx/UPS logic & printing
                 let shipMethodId = fulfillRec.getValue({ fieldId: 'shipmethod' });
 
                 const fedexRelatedMethod = [
@@ -162,7 +162,21 @@ define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexH
                         '3784', // FedEx Standard Overnight® WC
                         '14075' //FedEx One Rate - PAK
                 ];
-                if (fedexRelatedMethod.includes(shipMethodId)) { // FedEx Ground internal id
+
+                const upsRelatedMethod = [
+                        '4',    // UPS Ground
+                        '40',   // UPS Ground (WC)
+                        '41',   // UPS Next Day Air
+                        '43',   // UPS Next Day Air Saver
+                        '3776', // UPS SurePost
+                        '3777', // UPS SurePost 1lb+
+                        '3778', // UPS 2nd Day Air
+                        '3779', // UPS 3 Day Select
+                        '3780', // UPS Next Day Air Early
+                        '8988'  // UPS 2nd Day Air A.M.
+                ];
+
+                if (fedexRelatedMethod.includes(shipMethodId)) {
                         itemFulfillmentPackageHelper.processFullSmallParcel(fulfillRec.id, shipMethodId);
                         fulfillRec = record.load({
                             type: record.Type.ITEM_FULFILLMENT,
@@ -170,10 +184,18 @@ define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexH
                             isDynamic: false
                         });
                         fedexHelper.createShipment(fulfillRec, false);
-
                         // Printing labels have been moved to fedexHelper.js for optimization purpose
+                } else if (upsRelatedMethod.includes(shipMethodId)) {
+                        itemFulfillmentPackageHelper.processFullSmallParcel(fulfillRec.id, shipMethodId);
+                        fulfillRec = record.load({
+                            type: record.Type.ITEM_FULFILLMENT,
+                            id: ifId,
+                            isDynamic: false
+                        });
+                        upsHelper.createShipment(fulfillRec, false);
+                        // UPS label printing handled in upsHelper.js
                 } else {
-                        log.debug({ title: 'FedEx Auto Print Skip', details: 'Ship method not FedEx Ground on transition to Packed (id=' + shipMethodId + ')' });
+                        log.debug({ title: 'Auto Print Skip', details: 'Ship method is not FedEx or UPS (id=' + shipMethodId + ')' });
                 }
 
                 // Calculate and log execution time - SUCCESS case
