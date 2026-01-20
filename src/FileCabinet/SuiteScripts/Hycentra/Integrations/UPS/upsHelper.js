@@ -1056,6 +1056,25 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 log.debug('Multiple Tracking Info', 'Found ' + packageResults.length + ' packages in UPS response');
 
+                // Search PackShip records to get actual weights for each carton
+                var packshipRecords = searchPackShipRecords(fulfillmentId);
+                var cartonWeightMap = {}; // cartonName -> weight
+                if (packshipRecords && packshipRecords.length > 0) {
+                    var cartonGroups = groupPackShipByCarton(packshipRecords);
+                    for (var cartonName in cartonGroups) {
+                        var actualWeight = cartonGroups[cartonName][0].actualWeight || 0;
+                        if (actualWeight > 0) {
+                            cartonWeightMap[cartonName] = actualWeight;
+                            log.debug('Carton Weight Map', 'Carton "' + cartonName + '": ' + actualWeight + ' lbs (actual weight from PackShip carton)');
+                        } else {
+                            // Fall back to calculated weight
+                            var cartonData = calculateCartonData(cartonGroups[cartonName]);
+                            cartonWeightMap[cartonName] = cartonData.weight;
+                            log.debug('Carton Weight Map', 'Carton "' + cartonName + '": ' + cartonData.weight + ' lbs (calculated from item weights - no actual weight available)');
+                        }
+                    }
+                }
+
                 // Load the Item Fulfillment record for updating
                 var recordForUpdate = record.load({
                     type: record.Type.ITEM_FULFILLMENT,
@@ -1065,7 +1084,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var packageCount = recordForUpdate.getLineCount({ sublistId: 'package' });
                 log.debug('Multiple Tracking Info', 'Package lines in NetSuite: ' + packageCount);
 
-                // Update tracking numbers sequentially
+                // Update tracking numbers and weights
                 for (var i = 0; i < Math.min(packageCount, packageResults.length); i++) {
                     var trackingNumber = packageResults[i].TrackingNumber;
 
@@ -1076,7 +1095,24 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         value: trackingNumber
                     });
 
-                    log.debug('Tracking Update', 'Package ' + (i + 1) + ': ' + trackingNumber);
+                    // Try to get carton name from package line and update weight
+                    var cartonNumber = recordForUpdate.getSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagecartonnumber',
+                        line: i
+                    });
+
+                    if (cartonNumber && cartonWeightMap[cartonNumber]) {
+                        recordForUpdate.setSublistValue({
+                            sublistId: 'package',
+                            fieldId: 'packageweight',
+                            line: i,
+                            value: cartonWeightMap[cartonNumber]
+                        });
+                        log.debug('Tracking Update', 'Package ' + (i + 1) + ' (' + cartonNumber + '): tracking=' + trackingNumber + ', weight=' + cartonWeightMap[cartonNumber]);
+                    } else {
+                        log.debug('Tracking Update', 'Package ' + (i + 1) + ': tracking=' + trackingNumber + ' (no weight update - carton not found in PackShip)');
+                    }
                 }
 
                 // Also set the shipping label URL if provided
@@ -1128,6 +1164,12 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             name: 'name',
                             join: 'custrecord_packship_carton',
                             label: 'Carton Name'
+                        }),
+                        // Join to get the actual weight from the PackShip - Pack Carton record
+                        search.createColumn({
+                            name: 'custrecord_packship_cartonactualweight',
+                            join: 'custrecord_packship_carton',
+                            label: 'Carton Actual Weight'
                         })
                     ]
                 });
@@ -1148,16 +1190,24 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         join: 'custrecord_packship_carton'
                     });
 
+                    // Get the actual weight from the joined PackShip - Pack Carton record
+                    var actualWeight = parseFloat(result.getValue({
+                        name: 'custrecord_packship_cartonactualweight',
+                        join: 'custrecord_packship_carton'
+                    })) || 0;
+
                     packshipRecords.push({
                         id: result.getValue('internalid'),
                         carton: cartonName,
                         cartonRecordId: cartonRecordId,
                         item: itemValue,
-                        quantity: parseFloat(quantityValue) || 0
+                        quantity: parseFloat(quantityValue) || 0,
+                        actualWeight: actualWeight // Actual weight from carton record
                     });
 
                     log.debug('PackShip Record', 'ID: ' + result.getValue('internalid') +
-                        ', Carton: "' + cartonName + '", Item: ' + itemValue + ', Qty: ' + quantityValue);
+                        ', Carton: "' + cartonName + '", Item: ' + itemValue + ', Qty: ' + quantityValue +
+                        ', Actual Weight: ' + actualWeight);
                 }
 
                 log.debug('PackShip Search', 'Found ' + packshipRecords.length + ' records for fulfillment ' + fulfillmentId);
@@ -1299,6 +1349,77 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 weight: totalWeight,
                 dimensions: bestDimensions
             };
+        }
+
+        /**
+         * Calculate only dimensions for a carton (used when actual weight is available)
+         * This is a lightweight version that still needs item records for dimensions
+         *
+         * @param {Array} packshipRecords Array of packship records for one carton
+         * @returns {Object} Dimensions object { length, width, height }
+         */
+        function calculateCartonDimensions(packshipRecords) {
+            var largestVolume = 0;
+            var bestDimensions = { length: 0, width: 0, height: 0 };
+
+            for (var i = 0; i < packshipRecords.length; i++) {
+                var packshipRecord = packshipRecords[i];
+
+                if (!packshipRecord.item || !packshipRecord.quantity || packshipRecord.quantity <= 0) {
+                    continue;
+                }
+
+                try {
+                    // Load the item record
+                    var itemRecord;
+                    var itemTypes = ['inventoryitem', 'kititem'];
+                    var loadSuccess = false;
+
+                    for (var t = 0; t < itemTypes.length; t++) {
+                        try {
+                            itemRecord = record.load({
+                                type: itemTypes[t],
+                                id: packshipRecord.item
+                            });
+                            loadSuccess = true;
+                            break;
+                        } catch (typeError) {
+                            // Continue to next type
+                        }
+                    }
+
+                    if (!loadSuccess) {
+                        continue;
+                    }
+
+                    // DIMENSION CALCULATION - from custom item fields
+                    var parsedWidth = parseFloat(itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_width' })) || 0;
+                    var parsedLength = parseFloat(itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_length' })) || 0;
+                    var parsedHeight = parseFloat(itemRecord.getValue({ fieldId: 'custitem_fmt_shipping_height' })) || 0;
+
+                    var volume = parsedWidth * parsedLength * parsedHeight;
+
+                    // Use largest volume item's dimensions
+                    if (volume > largestVolume) {
+                        largestVolume = volume;
+                        bestDimensions = {
+                            length: parsedLength,
+                            width: parsedWidth,
+                            height: parsedHeight
+                        };
+                    }
+
+                } catch (itemError) {
+                    log.error('Carton Dimensions Item Error', 'Failed to process item ' + packshipRecord.item + ': ' + itemError.message);
+                }
+            }
+
+            // Apply minimum dimensions if all are 0
+            if (bestDimensions.length === 0 && bestDimensions.width === 0 && bestDimensions.height === 0) {
+                bestDimensions = { length: 10, width: 10, height: 10 };
+            }
+
+            return bestDimensions;
         }
 
         /**
@@ -1574,7 +1695,24 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                     for (var c = 0; c < cartonKeys.length; c++) {
                         var cartonId = cartonKeys[c];
-                        var cartonData = calculateCartonData(cartonGroups[cartonId]);
+                        var cartonRecords = cartonGroups[cartonId];
+
+                        // Check if actual weight is available from PackShip carton record
+                        var actualWeight = cartonRecords[0].actualWeight || 0;
+
+                        var weight, dimensions;
+                        if (actualWeight > 0) {
+                            // Use actual weight from carton record, only calculate dimensions
+                            weight = actualWeight;
+                            dimensions = calculateCartonDimensions(cartonRecords);
+                            log.debug('Carton Weight Source', 'Using actual weight for carton "' + cartonId + '": ' + weight + ' lbs');
+                        } else {
+                            // Fall back to calculated weight/dimensions from item records
+                            var cartonData = calculateCartonData(cartonRecords);
+                            weight = cartonData.weight;
+                            dimensions = cartonData.dimensions;
+                            log.debug('Carton Weight Source', 'Using calculated weight for carton "' + cartonId + '": ' + weight + ' lbs (actual weight not available)');
+                        }
 
                         var packageObj = {
                             Description: 'Package ' + (c + 1) + ' - ' + cartonId,
@@ -1587,16 +1725,16 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                     Code: 'IN',
                                     Description: 'Inches'
                                 },
-                                Length: String(Math.ceil(cartonData.dimensions.length) || 10),
-                                Width: String(Math.ceil(cartonData.dimensions.width) || 10),
-                                Height: String(Math.ceil(cartonData.dimensions.height) || 10)
+                                Length: String(Math.ceil(dimensions.length) || 10),
+                                Width: String(Math.ceil(dimensions.width) || 10),
+                                Height: String(Math.ceil(dimensions.height) || 10)
                             },
                             PackageWeight: {
                                 UnitOfMeasurement: {
                                     Code: 'LBS',
                                     Description: 'Pounds'
                                 },
-                                Weight: String(cartonData.weight)
+                                Weight: String(weight)
                             }
                         };
 
