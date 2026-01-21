@@ -3,8 +3,8 @@
  * @NScriptType ClientScript
  */
 
-define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/search','./Con_Lib_Print_Node','./Con_Lib_PackShip_Lib','./Con_Lib_Customer_Config', '../../Hycentra/Integrations/FedEX/fedexHelper', './Con_Lib_Print_Node'],
-    (currentRecord, record, https, url, runtime, search, printNode, packShipLib, customerCfg, fedexHelper, printNodeLib) => {
+define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/search','./Con_Lib_Print_Node','./Con_Lib_PackShip_Lib','./Con_Lib_Customer_Config', './Con_Lib_Print_Node'],
+    (currentRecord, record, https, url, runtime, search, printNode, packShipLib, customerCfg, printNodeLib) => {
     const SUITELET_BOL = 'customscript_con_sl_ps_print_bol';
     const SUITELET_BOL_DEPLOY = 'customdeploy_con_sl_ps_print_bol';
     const SUITELET_HOME_DEPOT_LABEL = 'customscript_con_sl_homedepot_label_prt';
@@ -431,6 +431,7 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
 
     /**
      * Retry downloading FedEx labels from stored original URLs
+     * Calls a server-side Suitelet because fedexHelper requires server-only modules (N/log, N/file)
      * Used when initial download failed but shipment was created successfully
      */
     function conPsRetryLabelDownload() {
@@ -441,15 +442,33 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
             const ifId = currentRecord.get().id;
             console.log('Retrying label download for Item Fulfillment:', ifId);
 
-            // Call the fedexHelper retry function
-            const result = fedexHelper.retryLabelDownload(ifId);
+            // Call the FedEx Retry Label Download Suitelet (server-side) since fedexHelper uses server-only modules
+            const suiteletUrl = url.resolveScript({
+                scriptId: 'customscript_hyc_fedex_retry_label',
+                deploymentId: 'customdeploy_hyc_fedex_retry_label',
+                params: { ifid: ifId }
+            });
 
-            if (result.success) {
-                alert('Label download successful!\n\n' + result.message);
-                location.reload(); // Refresh to update button visibility
+            console.log('Calling FedEx Retry Label Suitelet:', suiteletUrl);
+
+            const response = https.get({
+                url: suiteletUrl
+            });
+
+            console.log('Suitelet response:', response.body);
+
+            if (response.code === 200) {
+                const result = JSON.parse(response.body);
+
+                if (result.success) {
+                    alert('Label download successful!\n\n' + result.message);
+                    location.reload(); // Refresh to update button visibility
+                } else {
+                    alert('Label download completed with issues:\n\n' + result.message);
+                    location.reload();
+                }
             } else {
-                alert('Label download completed with issues:\n\n' + result.message);
-                location.reload();
+                alert('Label download failed:\n\nHTTP Error ' + response.code);
             }
         } catch (e) {
             console.error('Retry label download error:', e);
@@ -459,6 +478,7 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
 
     /**
      * Re-create FedEx shipment (creates new tracking number and label)
+     * Calls a server-side Suitelet because fedexHelper requires server-only modules (N/log, N/file)
      * Use with caution - this creates a completely new shipment
      */
     function conPsRecreateShipment() {
@@ -474,27 +494,38 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
 
         try {
             const ifId = currentRecord.get().id;
-            console.log('Re-creating shipment for Item Fulfillment:', ifId);
+            console.log('Re-creating FedEx shipment for Item Fulfillment:', ifId);
 
-            // Load the fulfillment record
-            const ifRec = record.load({
-                type: record.Type.ITEM_FULFILLMENT,
-                id: ifId,
-                isDynamic: false
+            // Call the FedEx Re-create Suitelet (server-side) since fedexHelper uses server-only modules
+            const suiteletUrl = url.resolveScript({
+                scriptId: 'customscript_hyc_fedex_recreate_shipment',
+                deploymentId: 'customdeploy_hyc_fedex_recreate_shipment',
+                params: { ifid: ifId }
             });
 
-            // Call the fedexHelper createShipment function
-            const result = fedexHelper.createShipment(ifRec, false);
+            console.log('Calling FedEx Re-create Suitelet:', suiteletUrl);
 
-            if (result.success) {
-                alert('Shipment created successfully!\n\nTracking Number: ' + (result.trackingNumber || 'See record'));
-                location.reload();
+            const response = https.get({
+                url: suiteletUrl
+            });
+
+            console.log('Suitelet response:', response.body);
+
+            if (response.code === 200) {
+                const result = JSON.parse(response.body);
+
+                if (result.success) {
+                    alert('FedEx Shipment created successfully!\n\nTracking Number: ' + (result.trackingNumber || 'See record'));
+                    location.reload();
+                } else {
+                    alert('FedEx Shipment creation failed:\n\n' + (result.message || 'Unknown error'));
+                }
             } else {
-                alert('Shipment creation failed:\n\n' + (result.message || result.error || 'Unknown error'));
+                alert('FedEx Shipment creation failed:\n\nHTTP Error ' + response.code);
             }
         } catch (e) {
-            console.error('Re-create shipment error:', e);
-            alert('Error re-creating shipment: ' + e.message);
+            console.error('Re-create FedEx shipment error:', e);
+            alert('Error re-creating FedEx shipment: ' + e.message);
         }
     }
 
