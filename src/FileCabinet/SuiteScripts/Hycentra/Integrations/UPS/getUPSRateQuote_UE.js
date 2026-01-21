@@ -466,14 +466,11 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './upsRateQuote', './upsAddr
 
                 if (isCreateOperation) {
                     if (orderType === 'WEBSITE') {
-                        shouldValidateAddress = true;
-                        if (orderIsLTL) {
-                            shouldUpdateShipMethod = false;
-                            log.debug('UPS Address Validation', 'Website LTL order CREATE - validation only, no ship method update');
-                        } else {
-                            shouldUpdateShipMethod = true;
-                            log.debug('UPS Address Validation', 'Website Small Parcel order CREATE - validation and ship method update');
-                        }
+                        // Website orders use FedEx, not UPS - skip UPS processing entirely
+                        // FedEx script (getFedExRateQuote_UE.js) handles address validation and ship method assignment
+                        shouldValidateAddress = false;
+                        shouldUpdateShipMethod = false;
+                        log.debug('UPS Address Validation', 'Website order CREATE - skipping UPS processing (handled by FedEx)');
                     } else if (orderType === 'EDI') {
                         if (orderIsLTL) {
                             shouldValidateAddress = true;

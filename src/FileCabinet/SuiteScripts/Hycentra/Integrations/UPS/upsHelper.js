@@ -5,8 +5,8 @@
  * @NModuleScope SameAccount
  */
 
-define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search', 'N/encode', '../../../Concentrus/PackShipTemplate/Con_Lib_Print_Node.js'],
-    function (runtime, record, format, https, error, log, file, search, encode, printNodeLib) {
+define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search', 'N/encode', 'N/url', '../../../Concentrus/PackShipTemplate/Con_Lib_Print_Node.js'],
+    function (runtime, record, format, https, error, log, file, search, encode, url, printNodeLib) {
         const CONFIG_RECORD_TYPE = 'customrecord_hyc_ups_config';
         const SANDBOX_CONFIG_RECORD_ID = 1; // UPS Sandbox config record ID
         const PRODUCTION_CONFIG_RECORD_ID = 2; // UPS Production config record ID
@@ -1010,14 +1010,27 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 log.debug('Print UPS Labels', 'Printing ' + labelUrls.length + ' labels');
 
+                // Get NetSuite domain for converting relative URLs to full URLs
+                // PrintNode is an external service and needs full URLs to fetch label files
+                var domain = url.resolveDomain({
+                    hostType: url.HostType.APPLICATION,
+                    accountId: runtime.accountId
+                });
+
                 for (var i = 0; i < labelUrls.length; i++) {
                     try {
+                        // Convert relative URL to full URL if needed
+                        var labelUrl = labelUrls[i];
+                        var fullUrl = labelUrl.indexOf('http') === 0 ? labelUrl : 'https://' + domain + labelUrl;
+
+                        log.debug('Print UPS Label', 'Printing label ' + (i + 1) + ': ' + fullUrl);
+
                         printNodeLib.printByPrintNode(
                             'UPS Label ' + (i + 1),
-                            labelUrls[i],
+                            fullUrl,
                             printNodeLib.REPORT_TYPE.UPS_LABEL
                         );
-                        log.debug('Print UPS Label', 'Printed label: ' + labelUrls[i]);
+                        log.debug('Print UPS Label', 'Printed label: ' + fullUrl);
                     } catch (printError) {
                         log.error('Print UPS Label Error', 'Failed to print label ' + labelUrls[i] + ': ' + printError.message);
                     }
