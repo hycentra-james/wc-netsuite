@@ -227,42 +227,84 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             var allItems = itemIds.slice(); // Start with original items
             var kitComponentIds = [];
 
-            // Find kit components for any kit items in the list
-            var kitComponentSearch = search.create({
-                type: 'kititem',
-                filters: [
-                    ['internalid', 'anyof', itemIds],
-                    'AND',
-                    ['type', 'anyof', 'Kit']
-                ],
-                columns: [
-                    'internalid', // Kit ID
-                    search.createColumn({ name: 'internalid', join: 'memberItem' }), // Component ID
-                    search.createColumn({ name: 'itemid', join: 'memberItem' }), // Component item ID
-                    search.createColumn({ name: 'type', join: 'memberItem' }) // Component type
-                ]
+            // Process in batches if itemIds is very large to avoid search filter limits
+            // NetSuite 'anyof' filters can handle ~1000 IDs safely
+            var BATCH_SIZE = 500;
+            var totalBatches = Math.ceil(itemIds.length / BATCH_SIZE);
+
+            log.audit('Kit component expansion starting', {
+                'totalItems': itemIds.length,
+                'batchSize': BATCH_SIZE,
+                'batches': totalBatches
             });
 
-            kitComponentSearch.run().each(function(result) {
-                var kitId = result.getValue('internalid');
-                var componentId = result.getValue({ name: 'internalid', join: 'memberItem' });
-                var componentItemId = result.getValue({ name: 'itemid', join: 'memberItem' });
-                var componentType = result.getValue({ name: 'type', join: 'memberItem' });
+            for (var batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+                var startIdx = batchIndex * BATCH_SIZE;
+                var endIdx = Math.min(startIdx + BATCH_SIZE, itemIds.length);
+                var batchItems = itemIds.slice(startIdx, endIdx);
 
-                if (componentId && allItems.indexOf(componentId) === -1) {
-                    allItems.push(componentId);
-                    kitComponentIds.push(componentId);
-                    
-                    log.debug('Added kit component', {
-                        'kitId': kitId,
-                        'componentId': componentId,
-                        'componentItemId': componentItemId,
-                        'componentType': componentType
+                log.debug('Processing kit batch', {
+                    'batchNumber': batchIndex + 1,
+                    'totalBatches': totalBatches,
+                    'batchSize': batchItems.length
+                });
+
+                // Find kit components for any kit items in this batch
+                var kitComponentSearch = search.create({
+                    type: 'kititem',
+                    filters: [
+                        ['internalid', 'anyof', batchItems],
+                        'AND',
+                        ['type', 'anyof', 'Kit']
+                    ],
+                    columns: [
+                        'internalid', // Kit ID
+                        search.createColumn({ name: 'internalid', join: 'memberItem' }), // Component ID
+                        search.createColumn({ name: 'itemid', join: 'memberItem' }), // Component item ID
+                        search.createColumn({ name: 'type', join: 'memberItem' }) // Component type
+                    ]
+                });
+
+                // Use runPaged to handle searches with > 4000 results
+                var pagedData = kitComponentSearch.runPaged({
+                    pageSize: 1000 // Maximum page size
+                });
+
+                log.debug('Paged search info', {
+                    'batchNumber': batchIndex + 1,
+                    'pageCount': pagedData.pageRanges.length,
+                    'totalResults': pagedData.count
+                });
+
+                // Process each page
+                pagedData.pageRanges.forEach(function(pageRange) {
+                    var currentPage = pagedData.fetch({
+                        index: pageRange.index
                     });
-                }
 
-                return true;
-            });
+                    currentPage.data.forEach(function(result) {
+                        var kitId = result.getValue('internalid');
+                        var componentId = result.getValue({ name: 'internalid', join: 'memberItem' });
+                        var componentItemId = result.getValue({ name: 'itemid', join: 'memberItem' });
+                        var componentType = result.getValue({ name: 'type', join: 'memberItem' });
+
+                        if (componentId && allItems.indexOf(componentId) === -1) {
+                            allItems.push(componentId);
+                            kitComponentIds.push(componentId);
+
+                            // Only log first 10 to avoid log bloat
+                            if (kitComponentIds.length <= 10) {
+                                log.debug('Added kit component', {
+                                    'kitId': kitId,
+                                    'componentId': componentId,
+                                    'componentItemId': componentItemId,
+                                    'componentType': componentType
+                                });
+                            }
+                        }
+                    });
+                });
+            }
 
             log.audit('Kit component expansion completed', {
                 'originalItems': itemIds.length,
@@ -429,41 +471,76 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             var kitIds = [];
             var processedKits = {};
 
-            var kitSearch = search.create({
-                type: 'kititem',
-                filters: [
-                    ['type', 'anyof', 'Kit'],
-                    'AND',
-                    ['memberitem.internalid', 'anyof', componentItemIds]
-                ],
-                columns: [
-                    'internalid',
-                    'itemid',
-                    search.createColumn({ name: 'internalid', join: 'memberItem' }),
-                    search.createColumn({ name: 'itemid', join: 'memberItem' })
-                ]
+            // Process in batches to avoid filter limits with large component arrays
+            var BATCH_SIZE = 500;
+            var totalBatches = Math.ceil(componentItemIds.length / BATCH_SIZE);
+
+            log.audit('Finding kits containing components', {
+                'totalComponents': componentItemIds.length,
+                'batchSize': BATCH_SIZE,
+                'batches': totalBatches
             });
 
-            kitSearch.run().each(function(result) {
-                var kitId = result.getValue('internalid');
-                var kitName = result.getValue('itemid');
-                var componentId = result.getValue({ name: 'internalid', join: 'memberItem' });
-                var componentName = result.getValue({ name: 'itemid', join: 'memberItem' });
+            for (var batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+                var startIdx = batchIndex * BATCH_SIZE;
+                var endIdx = Math.min(startIdx + BATCH_SIZE, componentItemIds.length);
+                var batchComponents = componentItemIds.slice(startIdx, endIdx);
 
-                if (!processedKits[kitId]) {
-                    kitIds.push(kitId);
-                    processedKits[kitId] = true;
+                var kitSearch = search.create({
+                    type: 'kititem',
+                    filters: [
+                        ['type', 'anyof', 'Kit'],
+                        'AND',
+                        ['memberitem.internalid', 'anyof', batchComponents]
+                    ],
+                    columns: [
+                        'internalid',
+                        'itemid',
+                        search.createColumn({ name: 'internalid', join: 'memberItem' }),
+                        search.createColumn({ name: 'itemid', join: 'memberItem' })
+                    ]
+                });
 
-                    log.debug('Found kit containing component', {
-                        'kitId': kitId,
-                        'kitName': kitName,
-                        'componentId': componentId,
-                        'componentName': componentName
+                // Use runPaged to handle searches with > 4000 results
+                var pagedData = kitSearch.runPaged({
+                    pageSize: 1000
+                });
+
+                log.debug('Kit search paged info', {
+                    'batchNumber': batchIndex + 1,
+                    'pageCount': pagedData.pageRanges.length,
+                    'totalResults': pagedData.count
+                });
+
+                // Process each page
+                pagedData.pageRanges.forEach(function(pageRange) {
+                    var currentPage = pagedData.fetch({
+                        index: pageRange.index
                     });
-                }
 
-                return true;
-            });
+                    currentPage.data.forEach(function(result) {
+                        var kitId = result.getValue('internalid');
+                        var kitName = result.getValue('itemid');
+                        var componentId = result.getValue({ name: 'internalid', join: 'memberItem' });
+                        var componentName = result.getValue({ name: 'itemid', join: 'memberItem' });
+
+                        if (!processedKits[kitId]) {
+                            kitIds.push(kitId);
+                            processedKits[kitId] = true;
+
+                            // Only log first 10 to avoid log bloat
+                            if (kitIds.length <= 10) {
+                                log.debug('Found kit containing component', {
+                                    'kitId': kitId,
+                                    'kitName': kitName,
+                                    'componentId': componentId,
+                                    'componentName': componentName
+                                });
+                            }
+                        }
+                    });
+                });
+            }
 
             log.audit('Kit component search completed', {
                 'kitsFound': kitIds.length,
