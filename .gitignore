@@ -43,6 +43,9 @@ logs/
 # SuiteCloud specific
 .suitecloud/
 *.lock
-package-lock.json 
+package-lock.json
 /src/FileCabinet/SuiteScripts/Hycentra/References
 project.json
+
+# Documentation files
+*.md
