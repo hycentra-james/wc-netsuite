@@ -156,11 +156,17 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
 
                         updateSharedFields(fieldsToUpdate, kitRecord, itemRecord);
     
-                        // Synchronize related custom records
+                        // Synchronize related custom records (Cabinet Wood Material, etc.)
                         synchronizeRelatedRecords(itemId, kitId);
 
+                        // Save the kit record FIRST before syncing Related Parts
+                        // This avoids "Items have been deleted since you retrieved the form" error
                         kitRecord.save();
                         log.debug('Updated Kit', 'Kit ID: ' + kitId);
+
+                        // Synchronize Related Parts (aggregate from ALL member items)
+                        // This is done AFTER kit save to avoid record conflicts
+                        syncRelatedPartsToKit(kitId, kitRecord);
                     }
     
                     start += batchSize;
@@ -488,6 +494,207 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
         }
     }
 
+    /**
+     * Sync Related Parts from ALL member items to the Kit
+     * This is an aggregate sync - deletes all existing Kit Related Parts and recreates from all members
+     * @param {string} kitId - The kit item ID
+     * @param {Record} kitRecord - The already-loaded kit record (optional, will load if not provided)
+     */
+    function syncRelatedPartsToKit(kitId, kitRecord) {
+        try {
+            log.audit('Related Parts Sync Started', 'Kit ID: ' + kitId);
+
+            // Step 1: Delete ALL existing Related Parts for this Kit
+            var deletedCount = deleteAllKitRelatedParts(kitId);
+            log.audit('Related Parts Deleted', 'Kit ID: ' + kitId + ', Deleted: ' + deletedCount + ' records');
+
+            // Step 2: Get ALL member items of this Kit
+            var memberItems = getKitMemberItems(kitId, kitRecord);
+            log.audit('Kit Members Found', 'Kit ID: ' + kitId + ', Members: ' + memberItems.length);
+
+            if (memberItems.length === 0) {
+                log.audit('Related Parts Sync Complete', 'Kit ID: ' + kitId + ', No member items found');
+                return;
+            }
+
+            // Step 3: For each member item, get its Related Parts and create for Kit
+            var totalCreated = 0;
+            memberItems.forEach(function(memberItemId) {
+                var createdCount = createRelatedPartsFromMember(kitId, memberItemId);
+                totalCreated += createdCount;
+            });
+
+            log.audit('Related Parts Sync Complete', 'Kit ID: ' + kitId + ', Total Created: ' + totalCreated + ' from ' + memberItems.length + ' member items');
+
+        } catch (e) {
+            log.error('Error in syncRelatedPartsToKit', 'Kit ID: ' + kitId + ', Error: ' + e.message);
+        }
+    }
+
+    /**
+     * Delete ALL Related Parts records for a Kit
+     * @param {string} kitId - The kit item ID
+     * @returns {number} Number of records deleted
+     */
+    function deleteAllKitRelatedParts(kitId) {
+        try {
+            var deletedCount = 0;
+
+            // Search for all Related Parts where Base Item = Kit ID
+            var relatedPartsSearch = search.create({
+                type: 'customrecord_hyc_record_related_parts',
+                filters: [
+                    ['custrecord_hyc_itm_related_parts_baseitm', 'is', kitId]
+                ],
+                columns: ['internalid']
+            });
+
+            var results = relatedPartsSearch.run().getRange({ start: 0, end: 1000 });
+
+            results.forEach(function(result) {
+                try {
+                    var recordId = result.getValue('internalid');
+                    record.delete({
+                        type: 'customrecord_hyc_record_related_parts',
+                        id: recordId
+                    });
+                    deletedCount++;
+                } catch (deleteError) {
+                    log.error('Error deleting Related Part', 'Record ID: ' + result.getValue('internalid') + ', Error: ' + deleteError.message);
+                }
+            });
+
+            return deletedCount;
+
+        } catch (e) {
+            log.error('Error in deleteAllKitRelatedParts', 'Kit ID: ' + kitId + ', Error: ' + e.message);
+            return 0;
+        }
+    }
+
+    /**
+     * Get all member item IDs of a Kit
+     * @param {string} kitId - The kit item ID
+     * @param {Record} existingKitRecord - Optional already-loaded kit record to avoid re-loading
+     * @returns {Array} Array of member item internal IDs
+     */
+    function getKitMemberItems(kitId, existingKitRecord) {
+        try {
+            var memberItems = [];
+
+            // Use existing kit record if provided, otherwise load it
+            var kitRec = existingKitRecord || record.load({
+                type: 'kititem',
+                id: kitId
+            });
+
+            var memberCount = kitRec.getLineCount({ sublistId: 'member' });
+
+            for (var i = 0; i < memberCount; i++) {
+                var memberItemId = kitRec.getSublistValue({
+                    sublistId: 'member',
+                    fieldId: 'item',
+                    line: i
+                });
+                if (memberItemId) {
+                    memberItems.push(memberItemId);
+                }
+            }
+
+            return memberItems;
+
+        } catch (e) {
+            log.error('Error in getKitMemberItems', 'Kit ID: ' + kitId + ', Error: ' + e.message);
+            return [];
+        }
+    }
+
+    /**
+     * Create Related Parts records for Kit from a member item's Related Parts
+     * @param {string} kitId - The kit item ID
+     * @param {string} memberItemId - The member inventory item ID
+     * @returns {number} Number of records created
+     */
+    function createRelatedPartsFromMember(kitId, memberItemId) {
+        try {
+            var createdCount = 0;
+
+            // Search for Related Parts of the member item
+            var relatedPartsSearch = search.create({
+                type: 'customrecord_hyc_record_related_parts',
+                filters: [
+                    ['custrecord_hyc_itm_related_parts_baseitm', 'is', memberItemId]
+                ],
+                columns: [
+                    'internalid',
+                    'custrecord_hyc_itm_part_cats',
+                    'custrecord_hyc_itm_related_parts_part',
+                    'custrecord_hyc_itm_related_parts_qty'
+                ]
+            });
+
+            var results = relatedPartsSearch.run().getRange({ start: 0, end: 1000 });
+
+            log.debug('Member Related Parts', 'Member Item ID: ' + memberItemId + ', Found: ' + results.length + ' Related Parts');
+
+            results.forEach(function(result) {
+                try {
+                    // Create new Related Parts record for the Kit
+                    var newRecord = record.create({
+                        type: 'customrecord_hyc_record_related_parts'
+                    });
+
+                    // Set the Base Item to the Kit
+                    newRecord.setValue({
+                        fieldId: 'custrecord_hyc_itm_related_parts_baseitm',
+                        value: kitId
+                    });
+
+                    // Copy Part Category
+                    var partCategory = result.getValue('custrecord_hyc_itm_part_cats');
+                    if (partCategory) {
+                        newRecord.setValue({
+                            fieldId: 'custrecord_hyc_itm_part_cats',
+                            value: partCategory
+                        });
+                    }
+
+                    // Copy Part
+                    var part = result.getValue('custrecord_hyc_itm_related_parts_part');
+                    if (part) {
+                        newRecord.setValue({
+                            fieldId: 'custrecord_hyc_itm_related_parts_part',
+                            value: part
+                        });
+                    }
+
+                    // Copy Quantity
+                    var qty = result.getValue('custrecord_hyc_itm_related_parts_qty');
+                    if (qty) {
+                        newRecord.setValue({
+                            fieldId: 'custrecord_hyc_itm_related_parts_qty',
+                            value: qty
+                        });
+                    }
+
+                    var newRecordId = newRecord.save();
+                    createdCount++;
+
+                    log.debug('Created Related Part for Kit', 'Kit ID: ' + kitId + ', New Record ID: ' + newRecordId + ', Part: ' + part + ', Qty: ' + qty);
+
+                } catch (createError) {
+                    log.error('Error creating Related Part', 'Kit ID: ' + kitId + ', Source Record: ' + result.getValue('internalid') + ', Error: ' + createError.message);
+                }
+            });
+
+            return createdCount;
+
+        } catch (e) {
+            log.error('Error in createRelatedPartsFromMember', 'Kit ID: ' + kitId + ', Member Item ID: ' + memberItemId + ', Error: ' + e.message);
+            return 0;
+        }
+    }
+
     function getRequiredUpdateFields(itemRecord){
         try {
             // Retrieve the internal ID of the record category
@@ -571,7 +778,7 @@ function updateSharedFields(fieldsToUpdate, kitRecord, inventoryItemRecord) {
         var mismatchCount = 0;
 
         // Loop through the array of field IDs and update corresponding fields on the Kit/Package record
-        fieldsToUpdate.forEach(function(field, index) {
+        fieldsToUpdate.forEach(function(field) {
             // Inventory Item Source Field
             var itemFieldValue = inventoryItemRecord.getValue({ fieldId: field.source });
 
