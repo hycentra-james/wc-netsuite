@@ -103,13 +103,15 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
                 });
                 
     
-                log.audit('Processing Item', 'Item ID: ' + itemId );
-    
+                var itemCategory = itemRecord.getValue({ fieldId: 'class' });
+                var itemCategoryText = itemRecord.getText({ fieldId: 'class' });
+                log.audit('Processing Item', 'Item ID: ' + itemId + ', Category ID: ' + itemCategory + ' (' + itemCategoryText + ')');
+
                 if (!itemId) {
                     log.error('Missing Parameters', 'itemId is null');
                     return;
                 }
-    
+
                 // Search for kits containing the item
                 var kitItemSearch = search.create({
                     type: search.Type.KIT_ITEM,
@@ -117,33 +119,41 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
                         ['memberitem.internalid', search.Operator.ANYOF, itemId]
                     ],
                     columns: [
-                        'internalid'
+                        'internalid',
+                        'class'
                     ]
                 });
-    
+
                 var resultSet = kitItemSearch.run();
                 var batchSize = 50;
                 var start = runtime.getCurrentScript().getParameter({ name: 'custscript_start_index' }) || 0;
                 var kitRS;
-    
+
                 var fieldsToUpdate = getRequiredUpdateFields(itemRecord);
-    
-                log.debug('DEBUG', 'fieldsToUpdate: ' + fieldsToUpdate.length);
+
+                log.audit('Field Mappings Found', 'fieldsToUpdate count: ' + (fieldsToUpdate ? fieldsToUpdate.length : 0) + ' for source category: ' + itemCategory);
     
                 do {
                     kitRS = resultSet.getRange({ start: start, end: start + batchSize });
-    
-                    for (var i = 0; i < kitRS.length; i++) {
-                        var kitId = kitRS[i].getValue('internalid');
 
-                        log.debug('Processing Kit', 'Kit ID: ' + kitId);
-    
+                    log.audit('Kit Batch Retrieved', 'Found ' + kitRS.length + ' kits in batch starting at ' + start);
+
+                    for (var j = 0; j < kitRS.length; j++) {
+                        var kitId = kitRS[j].getValue('internalid');
+                        var kitCategoryFromSearch = kitRS[j].getValue('class');
+
+                        log.audit('Processing Kit', 'Kit ID: ' + kitId + ', Category from search: ' + kitCategoryFromSearch);
+
                         // Load the kit record and update shared fields
                         var kitRecord = record.load({
                             type: 'kititem',
                             id: kitId
                         });
-    
+
+                        var kitCategoryId = kitRecord.getValue({ fieldId: 'class' });
+                        var kitCategoryText = kitRecord.getText({ fieldId: 'class' });
+                        log.audit('Kit Category Details', 'Kit ID: ' + kitId + ', Category ID: ' + kitCategoryId + ' (' + kitCategoryText + '), Type: ' + typeof kitCategoryId);
+
                         updateSharedFields(fieldsToUpdate, kitRecord, itemRecord);
     
                         // Synchronize related custom records
@@ -478,10 +488,13 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
         }
     }
 
-    function getRequiredUpdateFields(record){
+    function getRequiredUpdateFields(itemRecord){
         try {
             // Retrieve the internal ID of the record category
-            var categoryId = record.getValue({ fieldId: 'class' });
+            var categoryId = itemRecord.getValue({ fieldId: 'class' });
+            var categoryText = itemRecord.getText({ fieldId: 'class' });
+
+            log.audit('getRequiredUpdateFields', 'Source Category ID: ' + categoryId + ' (' + categoryText + '), Type: ' + typeof categoryId);
 
             // Create a search to find the Item Fields Sync Map with the specified category
             var customRecordSearch = search.create({
@@ -502,10 +515,12 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
                 end: 1000 // Adjust as needed
             });
 
-            log.debug('DEBUG', 'searchResults.length = ' + searchResults.length);
+            log.audit('Field Mapping Search', 'Found ' + searchResults.length + ' mappings for source category ' + categoryId);
+
             // Retrieve the desired column values from the search results
-            fieldsToUpdate = [];
-            searchResults.forEach(function(result) {
+            var fieldsToUpdate = [];
+            var targetCategories = {};
+            searchResults.forEach(function(result, index) {
                 var targetCategory = result.getValue({
                     name: 'custrecord_hyc_item_field_sync_tar_cat'
                 });
@@ -516,6 +531,14 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
                     name: 'custrecord_hyc_item_fields_sync_tar_id'
                 });
 
+                // Track unique target categories
+                targetCategories[targetCategory] = (targetCategories[targetCategory] || 0) + 1;
+
+                // Log first mapping to show data types
+                if (index === 0) {
+                    log.audit('Sample Mapping', 'Target Category: ' + targetCategory + ' (type: ' + typeof targetCategory + '), Source: ' + sourceFieldId + ', Target: ' + targetFieldId);
+                }
+
                 // Push an object containing both source and target field IDs
                 fieldsToUpdate.push({
                     targetCategory: targetCategory,
@@ -523,7 +546,12 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
                     target: targetFieldId
                 });
             });
-            log.debug('DEBUG', 'fieldsToUpdate.length = ' + fieldsToUpdate.length);
+
+            // Log summary of target categories
+            var targetCatSummary = Object.keys(targetCategories).map(function(cat) {
+                return cat + ':' + targetCategories[cat];
+            }).join(', ');
+            log.audit('Target Categories Summary', targetCatSummary || 'No mappings found');
 
             return fieldsToUpdate;
 
@@ -537,50 +565,67 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log', 'N/task'], function(record
     }
 
 function updateSharedFields(fieldsToUpdate, kitRecord, inventoryItemRecord) {
-        // Loop through the array of field IDs and update corresponding fields on the Kit/Package record
-        fieldsToUpdate.forEach(function(field) {
-            log.debug('DEBUG', 'Source fieldId = ' + field.source);
-            log.debug('DEBUG', 'Target fieldId = ' + field.target);
+        var kitCategoryId = kitRecord.getValue({ fieldId: 'class' });
+        var updateCount = 0;
+        var skipCount = 0;
+        var mismatchCount = 0;
 
+        // Loop through the array of field IDs and update corresponding fields on the Kit/Package record
+        fieldsToUpdate.forEach(function(field, index) {
             // Inventory Item Source Field
             var itemFieldValue = inventoryItemRecord.getValue({ fieldId: field.source });
 
-            log.debug('DEBUG', 'Item field value = ' + itemFieldValue);
-            log.debug('DEBUG', 'Kit field value = ' + kitRecord.getValue({ fieldId: field.target }));
-            
             // Check if the target Category is the same as the Kit item
-            if (kitRecord.getValue({ fieldId: 'class' }) === field.targetCategory) {
+            // Convert both to strings for comparison to handle type mismatches
+            var kitCatStr = String(kitCategoryId);
+            var targetCatStr = String(field.targetCategory);
+
+            if (kitCatStr === targetCatStr) {
                 // Update the Kit target field only when it's being updated to avoid bombarding the audit/trail
                 var kitFieldValue = kitRecord.getValue({ fieldId: field.target });
                 if (itemFieldValue && itemFieldValue != kitFieldValue) {
-                    log.debug('DEBUG', 'Updating fieldValue = ' + itemFieldValue);
+                    log.audit('Field Update', 'Field: ' + field.source + ' -> ' + field.target + ', Value: "' + itemFieldValue + '" (was: "' + kitFieldValue + '")');
                     kitRecord.setValue({ fieldId: field.target, value: itemFieldValue });
+                    updateCount++;
                 } else {
-                    log.debug('DEBUG', 'Skipped - value unchanged or value is empty,  ' + itemFieldValue);
+                    skipCount++;
+                    // Only log first few skips to avoid log spam
+                    if (skipCount <= 3) {
+                        log.debug('Field Skipped', 'Field: ' + field.source + ' -> ' + field.target + ', Reason: ' + (itemFieldValue ? 'unchanged' : 'empty source value'));
+                    }
                 }
             } else {
-                // log.debug('DEBUG', 'Target Category does not match' + fieldValue);
-                // log.debug('DEBUG', 'Kit category = ' + kitRecord.getValue({ fieldId: 'class' }));
-                // log.debug('DEBUG', 'field.targetCategory = ' + field.targetCategory);
+                mismatchCount++;
+                // Log first category mismatch for debugging
+                if (mismatchCount === 1) {
+                    log.audit('Category Mismatch Example', 'Kit Category: ' + kitCatStr + ' (type: ' + typeof kitCategoryId + '), Target Category: ' + targetCatStr + ' (type: ' + typeof field.targetCategory + ')');
+                }
             }
         });
+
+        log.audit('Update Summary', 'Updated: ' + updateCount + ', Skipped (unchanged/empty): ' + skipCount + ', Category Mismatch: ' + mismatchCount + ' of ' + fieldsToUpdate.length + ' total mappings');
     }
 
     // Reschedule the script to process remaining records
-    function rescheduleScript(itemId, start) {
+    // Note: Fixed function signature - was receiving 3 args but only accepting 2
+    function rescheduleScript(itemRecordOrId, itemId, start) {
         try {
+            // Handle both old (3 arg) and potential new (2 arg) calls
+            var actualItemId = itemId || itemRecordOrId;
+            var actualStart = start || itemId;
+
             var scriptTask = task.create({
                 taskType: task.TaskType.SCHEDULED_SCRIPT,
                 scriptId: runtime.getCurrentScript().id,
                 deploymentId: runtime.getCurrentScript().deploymentId,
                 params: {
-                    custscript_item_id: itemId,
-                    custscript_start_index: start
+                    custscript_item_id: actualItemId,
+                    custscript_start_index: actualStart
                 }
             });
 
             var taskId = scriptTask.submit();
-            log.debug('Rescheduled Script', 'Task ID: ' + taskId + ', Start Index: ' + start);
+            log.audit('Rescheduled Script', 'Task ID: ' + taskId + ', Item ID: ' + actualItemId + ', Start Index: ' + actualStart);
         } catch (e) {
             log.error('Error Rescheduling Script', e.message);
         }
