@@ -11,17 +11,23 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         const PRODUCTION_CONFIG_RECORD_ID = 2; // FedEx Production config record ID [See Custom Record: customrecord_hyc_fedex_config]
         const WC_FEDEX_MAPPING_RECORD_ID = 10; // HYC Shipping Label Mapping List (Default Account to use WC FedEx account) [See Custom Record: customrecord_hyc_shipping_label_mapping]
         const WC_PHONE_NUMBER = '9097731777';
-        
+
+        // MISC item internal IDs (non-inventory items for replacement parts)
+        const MISC_ITEM_IDS = [3796, 7122]; // MISC, MISC-CA
+
         // Module-level variable to store test mode flag
-        var IS_TEST_MODE = false;
+        // Auto-detect based on NetSuite environment (sandbox vs production)
+        var IS_TEST_MODE = (runtime.envType === runtime.EnvType.SANDBOX);
 
         /**
          * Get the current config record ID based on test mode
+         * Checks runtime environment directly to avoid module initialization timing issues
          *
          * @returns {number} Config record ID
          */
         function getCurrentConfigRecordId() {
-            return IS_TEST_MODE ? SANDBOX_CONFIG_RECORD_ID : PRODUCTION_CONFIG_RECORD_ID;
+            var isSandbox = (runtime.envType === runtime.EnvType.SANDBOX);
+            return isSandbox ? SANDBOX_CONFIG_RECORD_ID : PRODUCTION_CONFIG_RECORD_ID;
         }
 
         /**
@@ -30,11 +36,16 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {string} The URL string
          */
         function getApiUrl() {
+            // Define URLs at the top for clarity
+            var SANDBOX_URL = 'https://apis-sandbox.fedex.com/';
+            var PRODUCTION_URL = 'https://apis.fedex.com/';
+
             try {
-                // Get config record ID based on current test mode
+                // Get config record ID based on current environment
                 var configRecordId = getCurrentConfigRecordId();
-                log.debug('DEBUG', 'getApiUrl()::IS_TEST_MODE = ' + IS_TEST_MODE + ', using config record ID = ' + configRecordId);
-                
+                var isSandbox = (runtime.envType === runtime.EnvType.SANDBOX);
+                log.debug('DEBUG', 'getApiUrl()::isSandbox = ' + isSandbox + ', using config record ID = ' + configRecordId);
+
                 // Load the config record directly to avoid circular dependency
                 var tokenRecord = record.load({
                     type: CONFIG_RECORD_TYPE,
@@ -43,21 +54,33 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 if (!tokenRecord.isEmpty) {
                     var endpoint = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_endpoint' });
+
+                    // If no endpoint configured, use appropriate default based on test mode
+                    if (!endpoint) {
+                        endpoint = IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                        log.debug('DEBUG', 'No endpoint configured, using default: ' + endpoint);
+                    }
+
                     // Ensure endpoint ends with trailing slash
                     if (endpoint && !endpoint.endsWith('/')) {
                         endpoint = endpoint + '/';
                         log.debug('DEBUG', 'Added trailing slash to endpoint: ' + endpoint);
                     }
-                    return endpoint || "https://apis.fedex.com/";
+
+                    log.debug('DEBUG', 'getApiUrl()::returning endpoint = ' + endpoint);
+                    return endpoint;
                 } else {
-                    return "https://apis.fedex.com/"; // Production endpoint
+                    var defaultUrl = IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                    log.debug('DEBUG', 'Empty token record, using default: ' + defaultUrl);
+                    return defaultUrl;
                 }
             } catch (e) {
                 log.error({
                     title: 'ERROR',
                     details: 'Error getting API URL, using default: ' + e.message
                 });
-                return "https://apis.fedex.com/"; // Fallback to production
+                // Fallback based on test mode
+                return IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
             }
         }
 
@@ -861,12 +884,22 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             "imageType": "ZPLII",
                             "labelStockType": "STOCK_4X6"
                         },
-                        "requestedPackageLineItems": buildPackageLineItems(fulfillmentRecord, mappingRecord)
+                        "requestedPackageLineItems": buildPackageLineItems(fulfillmentRecord, mappingRecord, shipMethodMapping)
                     },
                     "accountNumber": {
                         "value": wcAccountNumber  // TODO: Fix this with the Bill to Third Party Account ?
                     }
                 };
+
+                // Add special services for One Rate shipments
+                // FEDEX_ONE_RATE is required to enable One Rate pricing
+                // TODO: Add SATURDAY_DELIVERY conditionally (only when available for route/day)
+                if (isOneRateShipment(shipMethodMapping)) {
+                    log.debug('One Rate Shipment', 'Adding FEDEX_ONE_RATE special service');
+                    payload.requestedShipment.shipmentSpecialServices = {
+                        "specialServiceTypes": ["FEDEX_ONE_RATE"]
+                    };
+                }
 
                 log.debug('DEBUG', 'FedEx payload built successfully');
                 return payload;
@@ -1380,19 +1413,40 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
          * @param {Object} mappingRecord The shipping label mapping record
+         * @param {Object} shipMethodMapping The ship method mapping object (for One Rate detection)
          * @returns {Array} Array of package line items
          */
-        function buildPackageLineItems(fulfillmentRecord, mappingRecord) {
+        function buildPackageLineItems(fulfillmentRecord, mappingRecord, shipMethodMapping) {
             var packageLineItems = [];
             var fulfillmentId = fulfillmentRecord.id;
-            
+
             log.debug('PackShip Package Build', 'Starting package build for Item Fulfillment ID: ' + fulfillmentId);
 
             try {
                 // Step 1: Search for PackShip - Packed Item records
                 var packshipRecords = searchPackShipRecords(fulfillmentId);
-                
+
                 if (!packshipRecords || packshipRecords.length === 0) {
+                    // For One Rate shipments with MISC-only items, create default package
+                    if (isOneRateShipment(shipMethodMapping) && isMiscOnlyFulfillment(fulfillmentRecord)) {
+                        log.debug('One Rate MISC Shipment', 'No PackShip records, creating default 1 lb package for MISC items');
+
+                        var references = buildCustomerReferences(fulfillmentRecord, mappingRecord);
+                        var packageItem = {
+                            "weight": {
+                                "units": "LB",
+                                "value": 1
+                            }
+                        };
+
+                        if (references && references.length > 0) {
+                            packageItem.customerReferences = references;
+                        }
+
+                        packageLineItems.push(packageItem);
+                        return packageLineItems;
+                    }
+
                     throw error.create({
                         name: 'NO_PACKSHIP_RECORDS',
                         message: 'No PackShip - Packed Item records found for Item Fulfillment ID: ' + fulfillmentId + '. Item Fulfillment must be packed before creating FedEx shipment.'
@@ -1447,7 +1501,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         });
                     }
 
-                    var packageItem = buildCartonPackage(weight, cartonId, cartonReferences, dimensions);
+                    var packageItem = buildCartonPackage(weight, cartonId, cartonReferences, dimensions, isOneRateShipment(shipMethodMapping));
                     packageLineItems.push(packageItem);
                 }
                 
@@ -1852,23 +1906,33 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {number} weight The total weight of the carton
          * @param {string} cartonId The carton identifier (e.g., "SO188659-1")
          * @param {Array} references The customer references to include
+         * @param {boolean} isOneRate Whether this is a One Rate shipment (skip dimensions)
          * @returns {Object} FedEx package item object
          */
-        function buildCartonPackage(weight, cartonId, references, dimensions) {
-            log.debug('Building Carton Package', 'Carton: ' + cartonId + ', Weight: ' + weight + ' lbs, Dimensions: ' + dimensions.length + 'x' + dimensions.width + 'x' + dimensions.height);
+        function buildCartonPackage(weight, cartonId, references, dimensions, isOneRate) {
+            if (isOneRate) {
+                log.debug('Building Carton Package', 'Carton: ' + cartonId + ', Weight: ' + weight + ' lbs (One Rate - no dimensions)');
+            } else {
+                log.debug('Building Carton Package', 'Carton: ' + cartonId + ', Weight: ' + weight + ' lbs, Dimensions: ' + dimensions.length + 'x' + dimensions.width + 'x' + dimensions.height);
+            }
 
             var packageItem = {
                 "weight": {
                     "units": "LB",
                     "value": weight
-                },
-                "dimensions": {
+                }
+            };
+
+            // Only include dimensions for non-One Rate shipments
+            // One Rate uses standard FedEx container dimensions
+            if (!isOneRate && dimensions) {
+                packageItem.dimensions = {
                     "length": dimensions.length,
                     "width": dimensions.width,
                     "height": dimensions.height,
                     "units": "IN"
-                }
-            };
+                };
+            }
 
             // Add customer references to the package (FedEx requires them at package level)
             if (references && references.length > 0) {
@@ -1989,6 +2053,50 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             var mapping = shipMethodMapping || getShipMethodMapping(fulfillmentRecord);
             log.debug('DEBUG', 'getPackagingType()::Using packaging type: ' + mapping.packagingType);
             return mapping.packagingType;
+        }
+
+        /**
+         * Check if shipment is FedEx One Rate based on packaging type
+         * One Rate uses FedEx-provided packaging: FEDEX_ENVELOPE, FEDEX_PAK, etc.
+         *
+         * @param {Object} shipMethodMapping The ship method mapping object
+         * @returns {boolean} True if One Rate shipment
+         */
+        function isOneRateShipment(shipMethodMapping) {
+            if (!shipMethodMapping || !shipMethodMapping.packagingType) {
+                return false;
+            }
+            var oneRatePackagingTypes = ['FEDEX_ENVELOPE', 'FEDEX_PAK', 'FEDEX_SMALL_BOX', 'FEDEX_MEDIUM_BOX', 'FEDEX_LARGE_BOX', 'FEDEX_EXTRA_LARGE_BOX', 'FEDEX_TUBE'];
+            return oneRatePackagingTypes.indexOf(shipMethodMapping.packagingType) !== -1;
+        }
+
+        /**
+         * Check if fulfillment contains only MISC items (non-inventory replacement parts)
+         *
+         * @param {record} fulfillmentRecord The Item Fulfillment record
+         * @returns {boolean} True if fulfillment only contains MISC items
+         */
+        function isMiscOnlyFulfillment(fulfillmentRecord) {
+            var lineCount = fulfillmentRecord.getLineCount({ sublistId: 'item' });
+
+            if (lineCount === 0) {
+                return false;
+            }
+
+            for (var i = 0; i < lineCount; i++) {
+                var itemId = fulfillmentRecord.getSublistValue({
+                    sublistId: 'item',
+                    fieldId: 'item',
+                    line: i
+                });
+
+                // If any item is not a MISC item, return false
+                if (MISC_ITEM_IDS.indexOf(parseInt(itemId)) === -1) {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /**
