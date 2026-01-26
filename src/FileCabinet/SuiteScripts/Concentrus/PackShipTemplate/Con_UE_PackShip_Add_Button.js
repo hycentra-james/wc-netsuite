@@ -68,7 +68,9 @@ define(['N/record', 'N/runtime', 'N/url'], (record, runtime, url) => {
         '22', // FedEx Priority Overnight
         '3785', // FedEx Priority Overnight® WC
         '23', // FedEx Standard Overnight
-        '3784' // FedEx Standard Overnight® WC
+        '3784', // FedEx Standard Overnight® WC
+        '14686', // FedEx One Rate Envelope
+        '14075' // FedEx One Rate Pak
       ];
       const upsRelatedMethod = [
         '4',    // UPS Ground
