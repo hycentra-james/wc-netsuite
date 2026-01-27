@@ -11,7 +11,8 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexRateQuote', './fedex
         // FedEx Shipping Method IDs that should trigger rate quote
         const FEDEX_SHIPPING_METHOD_IDS = [
             3, 15, 3786, 16, 3783, 17, 18, 11597, 11596, 19,
-            3781, 20, 8987, 3782, 14075, 22, 3785, 23, 3784
+            3781, 20, 8987, 3782, 14075, 22, 3785, 23, 3784,
+            14686 // FedEx One Rate Envelope
         ];
 
         // Customer constants for order type identification

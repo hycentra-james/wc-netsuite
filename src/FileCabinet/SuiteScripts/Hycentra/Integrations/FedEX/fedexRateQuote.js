@@ -102,40 +102,57 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexHelper', './shipping
                 });
                 
                 
-                // Calculate weight and dimensions
-                var weightDimensionData = shippingWeightDimension.calculateSalesOrderWeightAndDimensions(salesOrderRecord);
-                
-                log.debug('Rate Quote Payload', 'Packages: ' + weightDimensionData.totalPackageCount + ', Total Weight: ' + weightDimensionData.totalWeight + ' lbs');
-                
-                // Build recipient info from Sales Order shipping address
-                var recipientInfo = buildRecipientInfoFromSalesOrder(salesOrderRecord);
-                
-                // Build shipper info
-                var shipperInfo = fedexHelper.buildShipperInfo(null, mappingRecord); // Pass null for fulfillment, use mapping
-                
+                // Check if this is a One Rate shipment first (need to know before building packages)
+                var shipMethodId = salesOrderRecord.getValue({ fieldId: 'shipmethod' });
+                var shipMethodMapping = fedexHelper.getShipMethodMappingById(shipMethodId);
+                var oneRatePackagingTypes = ['FEDEX_ENVELOPE', 'FEDEX_PAK', 'FEDEX_SMALL_BOX', 'FEDEX_MEDIUM_BOX', 'FEDEX_LARGE_BOX', 'FEDEX_EXTRA_LARGE_BOX', 'FEDEX_TUBE'];
+                var isOneRate = shipMethodMapping && shipMethodMapping.packagingType && oneRatePackagingTypes.indexOf(shipMethodMapping.packagingType) !== -1;
+
                 // Build package line items
                 var packageLineItems = [];
-                for (var i = 0; i < weightDimensionData.packages.length; i++) {
-                    var pkg = weightDimensionData.packages[i];
-                    var packageItem = {
+
+                if (isOneRate) {
+                    // One Rate: Always use single 1 lb package (no dimensions needed)
+                    log.debug('Rate Quote Payload', 'One Rate shipment - using single 1 lb package');
+                    packageLineItems.push({
                         weight: {
-                            value: parseFloat(pkg.weight) || 1, // Convert to number
+                            value: 1,
                             units: 'LB'
                         }
-                    };
-                    
-                    // Add dimensions if available
-                    if (pkg.dimensions && pkg.dimensions.length && pkg.dimensions.width && pkg.dimensions.height) {
-                        packageItem.dimensions = {
-                            length: parseFloat(pkg.dimensions.length) || 1, // Convert to number
-                            width: parseFloat(pkg.dimensions.width) || 1, // Convert to number
-                            height: parseFloat(pkg.dimensions.height) || 1, // Convert to number
-                            units: 'IN'
+                    });
+                } else {
+                    // Standard shipment: Calculate weight and dimensions from Sales Order
+                    var weightDimensionData = shippingWeightDimension.calculateSalesOrderWeightAndDimensions(salesOrderRecord);
+                    log.debug('Rate Quote Payload', 'Standard shipment - Packages: ' + weightDimensionData.totalPackageCount + ', Total Weight: ' + weightDimensionData.totalWeight + ' lbs');
+
+                    for (var i = 0; i < weightDimensionData.packages.length; i++) {
+                        var pkg = weightDimensionData.packages[i];
+                        var packageItem = {
+                            weight: {
+                                value: parseFloat(pkg.weight) || 1,
+                                units: 'LB'
+                            }
                         };
+
+                        // Add dimensions if available
+                        if (pkg.dimensions && pkg.dimensions.length && pkg.dimensions.width && pkg.dimensions.height) {
+                            packageItem.dimensions = {
+                                length: parseFloat(pkg.dimensions.length) || 1,
+                                width: parseFloat(pkg.dimensions.width) || 1,
+                                height: parseFloat(pkg.dimensions.height) || 1,
+                                units: 'IN'
+                            };
+                        }
+
+                        packageLineItems.push(packageItem);
                     }
-                    
-                    packageLineItems.push(packageItem);
                 }
+
+                // Build recipient info from Sales Order shipping address
+                var recipientInfo = buildRecipientInfoFromSalesOrder(salesOrderRecord);
+
+                // Build shipper info
+                var shipperInfo = fedexHelper.buildShipperInfo(null, mappingRecord); // Pass null for fulfillment, use mapping
                 
                 // Build full shipper address
                 var shipperAddress = {
@@ -219,7 +236,18 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './fedexHelper', './shipping
                 if (fedexServiceCode) {
                     payload.requestedShipment.serviceType = fedexServiceCode;
                 }
-                
+
+                // Add One Rate specific fields (using isOneRate determined earlier)
+                if (isOneRate) {
+                    log.debug('Rate Quote Payload', 'One Rate shipment detected - adding packaging type and special service');
+                    // Add packaging type for One Rate
+                    payload.requestedShipment.packagingType = shipMethodMapping.packagingType;
+                    // Add FEDEX_ONE_RATE special service
+                    payload.requestedShipment.shipmentSpecialServices = {
+                        specialServiceTypes: ['FEDEX_ONE_RATE']
+                    };
+                }
+
                 log.debug('Rate Quote Payload', 'Payload built successfully');
                 return payload;
                 

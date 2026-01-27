@@ -10,10 +10,14 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         const SANDBOX_CONFIG_RECORD_ID = 1; // FedEx Sandbox config record ID [See Custom Record: customrecord_hyc_fedex_config]
         const PRODUCTION_CONFIG_RECORD_ID = 2; // FedEx Production config record ID [See Custom Record: customrecord_hyc_fedex_config]
         const WC_FEDEX_MAPPING_RECORD_ID = 10; // HYC Shipping Label Mapping List (Default Account to use WC FedEx account) [See Custom Record: customrecord_hyc_shipping_label_mapping]
+        const WC_FEDEX_ONE_RATE_MAPPING_ID = 13; // HYC Shipping Label Mapping for One Rate shipping methods [See Custom Record: customrecord_hyc_shipping_label_mapping]
         const WC_PHONE_NUMBER = '9097731777';
 
         // MISC item internal IDs (non-inventory items for replacement parts)
         const MISC_ITEM_IDS = [3796, 7122]; // MISC, MISC-CA
+
+        // One Rate ship method IDs (for fallback to mapping record 13)
+        const ONE_RATE_SHIP_METHOD_IDS = [14686, 14075]; // FedEx One Rate Envelope, FedEx One Rate Pak
 
         // Module-level variable to store test mode flag
         // Auto-detect based on NetSuite environment (sandbox vs production)
@@ -374,13 +378,29 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         log.debug('DEBUG', 'getShippingLabelMapping()::Found mapping record');
                         return searchResults[0];
                     } else {
-                        log.debug('DEBUG', 'getShippingLabelMapping()::No matching mapping record found, using fallback record ID 10');
+                        log.debug('DEBUG', 'getShippingLabelMapping()::No matching mapping record found');
                     }
                 } else {
-                    log.debug('DEBUG', 'getShippingLabelMapping()::Missing customerId or shipMethodId, using fallback record ID 10');
+                    log.debug('DEBUG', 'getShippingLabelMapping()::Missing customerId or shipMethodId');
+                }
+
+                // Check if this is a One Rate ship method - use record 13
+                if (shipMethodId && ONE_RATE_SHIP_METHOD_IDS.indexOf(parseInt(shipMethodId)) !== -1) {
+                    log.debug('DEBUG', 'getShippingLabelMapping()::One Rate ship method detected, using record ID ' + WC_FEDEX_ONE_RATE_MAPPING_ID);
+                    var oneRateRecord = record.load({
+                        type: 'customrecord_hyc_shipping_label_mapping',
+                        id: WC_FEDEX_ONE_RATE_MAPPING_ID
+                    });
+                    return {
+                        getValue: function (fieldId) {
+                            return oneRateRecord.getValue({ fieldId: fieldId });
+                        },
+                        id: WC_FEDEX_ONE_RATE_MAPPING_ID
+                    };
                 }
 
                 // Fallback to record ID WC_FEDEX_MAPPING_RECORD_ID
+                log.debug('DEBUG', 'getShippingLabelMapping()::Using default fallback record ID ' + WC_FEDEX_MAPPING_RECORD_ID);
                 var fallbackRecord = record.load({
                     type: 'customrecord_hyc_shipping_label_mapping',
                     id: WC_FEDEX_MAPPING_RECORD_ID
@@ -390,7 +410,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 return {
                     getValue: function (fieldId) {
                         return fallbackRecord.getValue({ fieldId: fieldId });
-                    }
+                    },
+                    id: WC_FEDEX_MAPPING_RECORD_ID
                 };
 
             } catch (e) {
@@ -844,10 +865,17 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var wcAccountNumber = getTokenRecord().getValue({ fieldId: 'custrecord_hyc_fedex_account_number' });
                 var accountNumber = null;
 
-                // TODO: This account number will be used for third party billing later.
-                if (mappingRecord && mappingRecord.id !== WC_FEDEX_MAPPING_RECORD_ID) {
+                // Check if this is a Water Creation mapping (use SENDER payment) or third party billing
+                var wcMappingIds = [WC_FEDEX_MAPPING_RECORD_ID, WC_FEDEX_ONE_RATE_MAPPING_ID];
+                log.debug('Billing Check', 'mappingRecord.id = ' + (mappingRecord ? mappingRecord.id : 'null') +
+                    ', wcMappingIds = [' + wcMappingIds.join(', ') + ']' +
+                    ', indexOf result = ' + (mappingRecord ? wcMappingIds.indexOf(mappingRecord.id) : 'N/A'));
+                if (mappingRecord && wcMappingIds.indexOf(mappingRecord.id) === -1) {
                     accountNumber = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
                     isBillToThirdParty = true;
+                    log.debug('Billing Check', 'Setting isBillToThirdParty = true');
+                } else {
+                    log.debug('Billing Check', 'Using SENDER payment (Water Creation mapping)');
                 }
 
                 if (isBillToThirdParty && !accountNumber) {
@@ -893,11 +921,26 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 // Add special services for One Rate shipments
                 // FEDEX_ONE_RATE is required to enable One Rate pricing
-                // TODO: Add SATURDAY_DELIVERY conditionally (only when available for route/day)
+                // SATURDAY_DELIVERY is added when ship date is Thursday (free Saturday delivery for One Rate)
                 if (isOneRateShipment(shipMethodMapping)) {
-                    log.debug('One Rate Shipment', 'Adding FEDEX_ONE_RATE special service');
+                    var specialServices = ["FEDEX_ONE_RATE"];
+
+                    // Check if ship date is Thursday for Saturday Delivery
+                    // Ship date is already calculated with 3pm PT cutoff in getCurrentDateString()
+                    var shipDateStr = payload.requestedShipment.shipDatestamp;
+                    var shipDate = new Date(shipDateStr + 'T00:00:00');
+                    var dayOfWeek = shipDate.getDay(); // 0=Sun, 1=Mon, ..., 4=Thu
+
+                    if (dayOfWeek === 4) { // Thursday
+                        specialServices.push("SATURDAY_DELIVERY");
+                        log.debug('One Rate Shipment', 'Ship date is Thursday (' + shipDateStr + ') - adding SATURDAY_DELIVERY');
+                    } else {
+                        log.debug('One Rate Shipment', 'Ship date is not Thursday (' + shipDateStr + ', day=' + dayOfWeek + ') - no Saturday Delivery');
+                    }
+
+                    log.debug('One Rate Shipment', 'Adding special services: ' + specialServices.join(', '));
                     payload.requestedShipment.shipmentSpecialServices = {
-                        "specialServiceTypes": ["FEDEX_ONE_RATE"]
+                        "specialServiceTypes": specialServices
                     };
                 }
 
@@ -2101,16 +2144,35 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
         /**
          * Get current date in YYYY-MM-DD format
+         * Uses tomorrow's date if current time is after 3pm Pacific Time
+         * to avoid FedEx past date validation errors
          *
          * @returns {string} Current date string
          */
         function getCurrentDateString() {
-            var tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1); // Use tomorrow to avoid past date validation
-            var year = tomorrow.getFullYear();
-            var month = String(tomorrow.getMonth() + 1).padStart(2, '0');
-            var day = String(tomorrow.getDate()).padStart(2, '0');
-            return year + '-' + month + '-' + day;
+            // Get current time in Pacific timezone
+            var now = new Date();
+            var pacificTimeString = now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+            var pacificTime = new Date(pacificTimeString);
+            var currentHour = pacificTime.getHours();
+
+            var shipDate = new Date();
+
+            // If after 3pm PT (15:00), use tomorrow's date
+            if (currentHour >= 15) {
+                shipDate.setDate(shipDate.getDate() + 1);
+            }
+
+            // Format as YYYY-MM-DD
+            var year = shipDate.getFullYear();
+            var month = String(shipDate.getMonth() + 1).padStart(2, '0');
+            var day = String(shipDate.getDate()).padStart(2, '0');
+
+            var shipDateString = year + '-' + month + '-' + day;
+
+            log.debug('getCurrentDateString', 'Pacific Hour: ' + currentHour + ', Ship Date: ' + shipDateString);
+
+            return shipDateString;
         }
 
         /**
@@ -2817,6 +2879,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getServiceType: getServiceType,
             getPackagingType: getPackagingType,
             getFedExServiceCode: getFedExServiceCode,
+            getShipMethodMappingById: getShipMethodMappingById,
             getCurrentDateString: getCurrentDateString,
             getShippingLabelMapping: getShippingLabelMapping,
             validatePhoneNumber: validatePhoneNumber,
