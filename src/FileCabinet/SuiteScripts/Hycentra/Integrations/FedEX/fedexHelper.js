@@ -1470,9 +1470,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var packshipRecords = searchPackShipRecords(fulfillmentId);
 
                 if (!packshipRecords || packshipRecords.length === 0) {
-                    // For One Rate shipments with MISC-only items, create default package
-                    if (isOneRateShipment(shipMethodMapping) && isMiscOnlyFulfillment(fulfillmentRecord)) {
-                        log.debug('One Rate MISC Shipment', 'No PackShip records, creating default 1 lb package for MISC items');
+                    // For One Rate shipments, create default 1 lb package (no PackShip required)
+                    if (isOneRateShipment(shipMethodMapping)) {
+                        log.debug('One Rate Shipment', 'No PackShip records, creating default 1 lb package for One Rate');
 
                         var references = buildCustomerReferences(fulfillmentRecord, mappingRecord);
                         var packageItem = {

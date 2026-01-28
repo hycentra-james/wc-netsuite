@@ -160,7 +160,8 @@ define(['N/record','N/search','N/log', '../../Hycentra/Integrations/FedEX/fedexH
                         '3785', // FedEx Priority Overnight® WC
                         '23', // FedEx Standard Overnight
                         '3784', // FedEx Standard Overnight® WC
-                        '14075' //FedEx One Rate - PAK
+                        '14686', // FedEx One Rate Envelope
+                        '14075' // FedEx One Rate Pak
                 ];
 
                 const upsRelatedMethod = [
