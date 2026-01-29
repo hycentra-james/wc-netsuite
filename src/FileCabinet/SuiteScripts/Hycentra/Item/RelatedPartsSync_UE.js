@@ -48,14 +48,22 @@ define(['N/record', 'N/search', 'N/task', 'N/runtime', 'N/log'], (record, search
             if (eventType === context.UserEventType.DELETE) {
                 // For delete, use oldRecord since newRecord doesn't exist
                 const oldRecord = context.oldRecord;
+                if (!oldRecord) {
+                    log.debug('No Old Record', 'DELETE event has no oldRecord, skipping');
+                    return;
+                }
                 baseItemId = oldRecord.getValue({ fieldId: 'custrecord_hyc_itm_related_parts_baseitm' });
             } else {
                 // For create/edit, use newRecord
                 const newRecord = context.newRecord;
+                if (!newRecord) {
+                    log.debug('No New Record', `${eventType} event has no newRecord, skipping`);
+                    return;
+                }
                 baseItemId = newRecord.getValue({ fieldId: 'custrecord_hyc_itm_related_parts_baseitm' });
 
                 // Also check if Base Item changed (edit scenario)
-                if (eventType === context.UserEventType.EDIT) {
+                if (eventType === context.UserEventType.EDIT && context.oldRecord) {
                     const oldRecord = context.oldRecord;
                     const oldBaseItemId = oldRecord.getValue({ fieldId: 'custrecord_hyc_itm_related_parts_baseitm' });
 
@@ -78,7 +86,13 @@ define(['N/record', 'N/search', 'N/task', 'N/runtime', 'N/log'], (record, search
             triggerSyncForItem(baseItemId);
 
         } catch (e) {
-            log.error('Error in RelatedPartsSync_UE', `Error: ${e.message}`);
+            log.error('Error in RelatedPartsSync_UE', {
+                message: e.message,
+                name: e.name,
+                stack: e.stack,
+                eventType: context.type,
+                recordId: context.newRecord?.id || context.oldRecord?.id || 'unknown'
+            });
         }
     };
 
