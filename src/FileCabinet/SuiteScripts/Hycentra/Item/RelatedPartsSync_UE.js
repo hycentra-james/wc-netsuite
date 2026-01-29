@@ -7,7 +7,7 @@
  * @NScriptType UserEventScript
  * @NModuleScope SameAccount
  */
-define(['N/record', 'N/search', 'N/task', 'N/runtime', 'N/log'], (record, search, task, runtime, log) => {
+define(['N/search', 'N/task', 'N/runtime', 'N/log'], (search, task, runtime, log) => {
 
     /**
      * After Submit - Trigger sync when Related Parts record is created, edited, or deleted
@@ -128,9 +128,14 @@ define(['N/record', 'N/search', 'N/task', 'N/runtime', 'N/log'], (record, search
                 log.audit('Sync Triggered', `Task ID: ${taskId}, Item ID: ${itemId}`);
 
             } catch (taskError) {
-                // If scheduled script fails (e.g., already queued), sync inline
-                log.debug('Scheduled Script Failed', `Error: ${taskError.message}, falling back to inline sync`);
-                syncRelatedPartsInline(kits);
+                // If scheduled script fails (e.g., already queued), just log and skip
+                // DO NOT fall back to inline sync - it exceeds governance limits during bulk operations
+                log.audit('Scheduled Script Not Queued', {
+                    itemId: itemId,
+                    kitCount: kits.length,
+                    reason: taskError.message,
+                    note: 'Sync will be handled when scheduled script runs'
+                });
             }
 
         } catch (e) {
@@ -165,187 +170,6 @@ define(['N/record', 'N/search', 'N/task', 'N/runtime', 'N/log'], (record, search
         }
 
         return kits;
-    };
-
-    /**
-     * Sync Related Parts inline (fallback if scheduled script can't be triggered)
-     * @param {Array} kitIds - Array of Kit internal IDs
-     */
-    const syncRelatedPartsInline = (kitIds) => {
-        kitIds.forEach((kitId) => {
-            try {
-                log.debug('Inline Sync', `Starting inline sync for Kit ID: ${kitId}`);
-
-                // Delete all existing Related Parts for this Kit
-                const deletedCount = deleteAllKitRelatedParts(kitId);
-                log.debug('Deleted Related Parts', `Kit ID: ${kitId}, Deleted: ${deletedCount}`);
-
-                // Get member items and recreate Related Parts
-                const memberItems = getKitMemberItems(kitId);
-                let totalCreated = 0;
-
-                memberItems.forEach((memberItemId) => {
-                    const createdCount = createRelatedPartsFromMember(kitId, memberItemId);
-                    totalCreated += createdCount;
-                });
-
-                log.audit('Inline Sync Complete', `Kit ID: ${kitId}, Created: ${totalCreated} Related Parts`);
-
-            } catch (e) {
-                log.error('Error in inline sync', `Kit ID: ${kitId}, Error: ${e.message}`);
-            }
-        });
-    };
-
-    /**
-     * Delete ALL Related Parts records for a Kit
-     * @param {string} kitId - The kit item ID
-     * @returns {number} Number of records deleted
-     */
-    const deleteAllKitRelatedParts = (kitId) => {
-        let deletedCount = 0;
-
-        try {
-            const relatedPartsSearch = search.create({
-                type: 'customrecord_hyc_record_related_parts',
-                filters: [
-                    ['custrecord_hyc_itm_related_parts_baseitm', 'is', kitId]
-                ],
-                columns: ['internalid']
-            });
-
-            const results = relatedPartsSearch.run().getRange({ start: 0, end: 1000 });
-
-            results.forEach((result) => {
-                try {
-                    record.delete({
-                        type: 'customrecord_hyc_record_related_parts',
-                        id: result.getValue('internalid')
-                    });
-                    deletedCount++;
-                } catch (deleteError) {
-                    log.error('Error deleting Related Part', `Record ID: ${result.getValue('internalid')}, Error: ${deleteError.message}`);
-                }
-            });
-
-        } catch (e) {
-            log.error('Error in deleteAllKitRelatedParts', `Kit ID: ${kitId}, Error: ${e.message}`);
-        }
-
-        return deletedCount;
-    };
-
-    /**
-     * Get all member item IDs of a Kit
-     * @param {string} kitId - The kit item ID
-     * @returns {Array} Array of member item internal IDs
-     */
-    const getKitMemberItems = (kitId) => {
-        const memberItems = [];
-
-        try {
-            const kitRecord = record.load({
-                type: 'kititem',
-                id: kitId
-            });
-
-            const memberCount = kitRecord.getLineCount({ sublistId: 'member' });
-
-            for (let i = 0; i < memberCount; i++) {
-                const memberItemId = kitRecord.getSublistValue({
-                    sublistId: 'member',
-                    fieldId: 'item',
-                    line: i
-                });
-                if (memberItemId) {
-                    memberItems.push(memberItemId);
-                }
-            }
-
-        } catch (e) {
-            log.error('Error in getKitMemberItems', `Kit ID: ${kitId}, Error: ${e.message}`);
-        }
-
-        return memberItems;
-    };
-
-    /**
-     * Create Related Parts records for Kit from a member item's Related Parts
-     * @param {string} kitId - The kit item ID
-     * @param {string} memberItemId - The member inventory item ID
-     * @returns {number} Number of records created
-     */
-    const createRelatedPartsFromMember = (kitId, memberItemId) => {
-        let createdCount = 0;
-
-        try {
-            const relatedPartsSearch = search.create({
-                type: 'customrecord_hyc_record_related_parts',
-                filters: [
-                    ['custrecord_hyc_itm_related_parts_baseitm', 'is', memberItemId]
-                ],
-                columns: [
-                    'internalid',
-                    'custrecord_hyc_itm_part_cats',
-                    'custrecord_hyc_itm_related_parts_part',
-                    'custrecord_hyc_itm_related_parts_qty'
-                ]
-            });
-
-            const results = relatedPartsSearch.run().getRange({ start: 0, end: 1000 });
-
-            results.forEach((result) => {
-                try {
-                    const newRecord = record.create({
-                        type: 'customrecord_hyc_record_related_parts'
-                    });
-
-                    // Set Base Item to Kit
-                    newRecord.setValue({
-                        fieldId: 'custrecord_hyc_itm_related_parts_baseitm',
-                        value: kitId
-                    });
-
-                    // Copy Part Category
-                    const partCategory = result.getValue('custrecord_hyc_itm_part_cats');
-                    if (partCategory) {
-                        newRecord.setValue({
-                            fieldId: 'custrecord_hyc_itm_part_cats',
-                            value: partCategory
-                        });
-                    }
-
-                    // Copy Part
-                    const part = result.getValue('custrecord_hyc_itm_related_parts_part');
-                    if (part) {
-                        newRecord.setValue({
-                            fieldId: 'custrecord_hyc_itm_related_parts_part',
-                            value: part
-                        });
-                    }
-
-                    // Copy Quantity
-                    const qty = result.getValue('custrecord_hyc_itm_related_parts_qty');
-                    if (qty) {
-                        newRecord.setValue({
-                            fieldId: 'custrecord_hyc_itm_related_parts_qty',
-                            value: qty
-                        });
-                    }
-
-                    newRecord.save();
-                    createdCount++;
-
-                } catch (createError) {
-                    log.error('Error creating Related Part', `Kit ID: ${kitId}, Error: ${createError.message}`);
-                }
-            });
-
-        } catch (e) {
-            log.error('Error in createRelatedPartsFromMember', `Kit ID: ${kitId}, Member: ${memberItemId}, Error: ${e.message}`);
-        }
-
-        return createdCount;
     };
 
     return {
