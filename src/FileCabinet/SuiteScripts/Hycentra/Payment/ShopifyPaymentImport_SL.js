@@ -218,8 +218,9 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
             summaryField.defaultValue = `
                 <div style="background-color: #f8f9fa; padding: 15px; border: 1px solid #dee2e6; border-radius: 4px; margin-bottom: 20px;">
                     <h3 style="margin-top: 0;">Preview Summary</h3>
+                    <p style="margin-top: 0; color: #6c757d;">Rows with the same Checkout ID are aggregated into a single payment.</p>
                     <div style="display: flex; gap: 30px; flex-wrap: wrap;">
-                        <div><strong>Total Rows:</strong> ${totalRows}</div>
+                        <div><strong>Total Entries:</strong> ${totalRows}</div>
                         <div style="color: #28a745;"><strong>Ready to Import:</strong> ${results.ready.length}</div>
                         <div style="color: #6c757d;"><strong>Skipped (No Invoice):</strong> ${results.skippedNoInvoice.length}</div>
                         <div style="color: #6c757d;"><strong>Skipped (Duplicate):</strong> ${results.skippedDuplicate.length}</div>
@@ -341,7 +342,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
          * Adds columns to a preview sublist
          */
         function addPreviewColumns(sublist, includeReason = false) {
-            sublist.addField({ id: 'custpage_row', type: serverWidget.FieldType.INTEGER, label: 'Row' });
+            sublist.addField({ id: 'custpage_row', type: serverWidget.FieldType.TEXT, label: 'CSV Row(s)' });
             sublist.addField({ id: 'custpage_order', type: serverWidget.FieldType.TEXT, label: 'Order' });
 
             // Sales Order link - URL field with linkText for display
@@ -373,7 +374,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
         function populatePreviewSublist(sublist, data, includeReason = false) {
             for (let i = 0; i < data.length; i++) {
                 const row = data[i];
-                sublist.setSublistValue({ id: 'custpage_row', line: i, value: row.rowNum || 0 });
+                sublist.setSublistValue({ id: 'custpage_row', line: i, value: String(row.rowNum || '-') });
                 sublist.setSublistValue({ id: 'custpage_order', line: i, value: row.order || '-' });
 
                 // Sales Order URL - only set if we have the ID
@@ -631,7 +632,9 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
         }
 
         /**
-         * Validates all CSV rows and categorizes them
+         * Validates all CSV rows and categorizes them.
+         * Rows sharing the same Checkout ID are aggregated (amounts summed)
+         * into a single entry so one Customer Payment is created per checkout.
          */
         function validateRows(rows) {
             const results = {
@@ -642,40 +645,28 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
                 errors: []
             };
 
-            // Skip header row (index 0)
+            // --- Phase 1: Parse rows, filter non-charges, aggregate by Checkout ID ---
+            const chargeGroups = {}; // keyed by checkoutId
+
             for (let i = 1; i < rows.length; i++) {
                 try {
                     const row = rows[i];
-                    const rowNum = i + 1; // Human-readable row number
+                    const rowNum = i + 1;
 
-                    // Skip empty rows
                     if (!row || row.length === 0 || (row.length === 1 && !row[0])) {
                         continue;
                     }
 
-                    // Extract values
                     const type = (row[CSV_COLUMNS.TYPE] || '').trim().toLowerCase();
                     const order = (row[CSV_COLUMNS.ORDER] || '').trim();
                     const payoutDate = (row[CSV_COLUMNS.PAYOUT_DATE] || '').trim();
                     const payoutId = (row[CSV_COLUMNS.PAYOUT_ID] || '').trim();
                     const amountStr = (row[CSV_COLUMNS.AMOUNT] || '0').trim();
-                    // Remove leading "#" from checkout ID if present
                     const checkoutId = (row[CSV_COLUMNS.CHECKOUT] || '').trim().replace(/^#/, '');
-
-                    // Parse amount (remove $ and commas if present)
                     const amount = parseFloat(amountStr.replace(/[$,]/g, '')) || 0;
 
-                    const rowData = {
-                        rowNum,
-                        type,
-                        order,
-                        payoutDate,
-                        payoutId,
-                        amount,
-                        checkoutId
-                    };
+                    const rowData = { rowNum, type, order, payoutDate, payoutId, amount, checkoutId };
 
-                    // Check if type is "charge"
                     if (type !== 'charge') {
                         results.skippedNotCharge.push({
                             ...rowData,
@@ -684,69 +675,93 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
                         continue;
                     }
 
-                    // Skip if no order number
                     if (!order) {
-                        results.skippedNoInvoice.push({
-                            ...rowData,
-                            skipReason: 'No order number in CSV'
-                        });
+                        results.skippedNoInvoice.push({ ...rowData, skipReason: 'No order number in CSV' });
                         continue;
                     }
 
-                    // Find the Sales Order by otherrefnum FIRST (so we have the ID for links)
-                    const salesOrderResult = findSalesOrder(order);
+                    if (!checkoutId) {
+                        results.errors.push({ ...rowData, skipReason: 'No Checkout ID in CSV' });
+                        continue;
+                    }
+
+                    // Aggregate by Checkout ID
+                    if (chargeGroups[checkoutId]) {
+                        chargeGroups[checkoutId].amount += amount;
+                        chargeGroups[checkoutId].sourceRows.push(rowNum);
+                    } else {
+                        chargeGroups[checkoutId] = {
+                            ...rowData,
+                            sourceRows: [rowNum]
+                        };
+                    }
+
+                } catch (e) {
+                    log.error('Row Parse Error', { row: i, error: e.message });
+                    results.errors.push({
+                        rowNum: i + 1,
+                        skipReason: SKIP_REASONS.PARSE_ERROR.replace('{error}', e.message)
+                    });
+                }
+            }
+
+            // --- Phase 2: Validate each aggregated group ---
+            for (const checkoutId of Object.keys(chargeGroups)) {
+                try {
+                    const group = chargeGroups[checkoutId];
+                    // Round to 2 decimal places to avoid floating point drift
+                    group.amount = Math.round(group.amount * 100) / 100;
+                    group.rowNum = group.sourceRows.join(', ');
+
+                    const salesOrderResult = findSalesOrder(group.order);
 
                     if (!salesOrderResult) {
                         results.skippedNoInvoice.push({
-                            ...rowData,
-                            skipReason: SKIP_REASONS.NO_SALES_ORDER.replace('{order}', order)
+                            ...group,
+                            skipReason: SKIP_REASONS.NO_SALES_ORDER.replace('{order}', group.order)
                         });
                         continue;
                     }
 
-                    // Find the Invoice for the Sales Order (before duplicate check so we have the link)
                     const invoiceResult = findInvoice(salesOrderResult.id);
 
-                    // Check for duplicate by checkout ID (after finding SO and Invoice so we can include links)
-                    if (checkoutId) {
-                        const existingPayment = findExistingPayment(checkoutId);
-                        if (existingPayment) {
-                            results.skippedDuplicate.push({
-                                ...rowData,
-                                salesOrderId: salesOrderResult.id,
-                                salesOrderTranId: salesOrderResult.tranid,
-                                invoiceId: invoiceResult ? invoiceResult.id : null,
-                                invoiceTranId: invoiceResult ? invoiceResult.tranid : null,
-                                existingPaymentId: existingPayment.id,
-                                existingPaymentTranId: existingPayment.tranid,
-                                skipReason: SKIP_REASONS.DUPLICATE
-                            });
-                            continue;
-                        }
+                    // Duplicate check
+                    const existingPayment = findExistingPayment(checkoutId);
+                    if (existingPayment) {
+                        results.skippedDuplicate.push({
+                            ...group,
+                            salesOrderId: salesOrderResult.id,
+                            salesOrderTranId: salesOrderResult.tranid,
+                            invoiceId: invoiceResult ? invoiceResult.id : null,
+                            invoiceTranId: invoiceResult ? invoiceResult.tranid : null,
+                            existingPaymentId: existingPayment.id,
+                            existingPaymentTranId: existingPayment.tranid,
+                            skipReason: SKIP_REASONS.DUPLICATE
+                        });
+                        continue;
                     }
 
                     if (!invoiceResult) {
                         results.skippedNoInvoice.push({
-                            ...rowData,
+                            ...group,
                             salesOrderId: salesOrderResult.id,
                             salesOrderTranId: salesOrderResult.tranid,
-                            skipReason: SKIP_REASONS.NO_INVOICE.replace('{order}', order)
+                            skipReason: SKIP_REASONS.NO_INVOICE.replace('{order}', group.order)
                         });
                         continue;
                     }
 
                     if (invoiceResult.multipleFound) {
                         results.errors.push({
-                            ...rowData,
+                            ...group,
                             salesOrderId: salesOrderResult.id,
                             skipReason: SKIP_REASONS.MULTIPLE_INVOICES.replace('{count}', invoiceResult.count)
                         });
                         continue;
                     }
 
-                    // Row is valid and ready to import
                     results.ready.push({
-                        ...rowData,
+                        ...group,
                         salesOrderId: salesOrderResult.id,
                         salesOrderTranId: salesOrderResult.tranid,
                         customerId: invoiceResult.customerId,
@@ -755,9 +770,10 @@ define(['N/ui/serverWidget', 'N/search', 'N/record', 'N/log', 'N/format'],
                     });
 
                 } catch (e) {
-                    log.error('Row Validation Error', { row: i, error: e.message });
+                    log.error('Group Validation Error', { checkoutId, error: e.message });
                     results.errors.push({
-                        rowNum: i + 1,
+                        rowNum: chargeGroups[checkoutId].sourceRows.join(', '),
+                        checkoutId,
                         skipReason: SKIP_REASONS.PARSE_ERROR.replace('{error}', e.message)
                     });
                 }
