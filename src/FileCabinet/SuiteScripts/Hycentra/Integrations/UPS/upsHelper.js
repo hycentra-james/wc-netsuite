@@ -1923,9 +1923,19 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             try {
                 log.debug('buildReturnShipmentPayload', 'Building return shipment payload for package ' + packageSequenceNumber);
 
-                // Get WC account number from config (still bill to WC)
+                // Get WC account number and check for third-party billing
                 var tokenRecord = getTokenRecord();
                 var wcAccountNumber = tokenRecord.getValue({ fieldId: 'custrecord_hyc_ups_account_number' });
+
+                var mappingRecord = getShippingLabelMapping(fulfillmentRecord);
+                var isBillToThirdParty = false;
+                var thirdPartyAccountNumber = null;
+
+                if (mappingRecord && mappingRecord.id && mappingRecord.id !== WC_UPS_MAPPING_RECORD_ID) {
+                    thirdPartyAccountNumber = mappingRecord.getValue('custrecord_hyc_ship_lbl_account_no');
+                    isBillToThirdParty = true;
+                    log.debug('buildReturnShipmentPayload', 'Third party billing detected for return. Account: ' + thirdPartyAccountNumber);
+                }
 
                 var tranId = fulfillmentRecord.getValue({ fieldId: 'tranid' }) || '';
 
@@ -1963,7 +1973,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 Name: outboundRecipientInfo.Name || 'Customer',
                                 AttentionName: outboundRecipientInfo.AttentionName || outboundRecipientInfo.Name || 'Customer',
                                 Phone: outboundRecipientInfo.Phone || { Number: '9999999999' },
-                                ShipperNumber: wcAccountNumber, // Still bill to WC account
+                                ShipperNumber: isBillToThirdParty ? thirdPartyAccountNumber : wcAccountNumber,
                                 Address: outboundRecipientInfo.Address
                             },
                             // Williams Sonoma return center is the destination
@@ -1980,15 +1990,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 Phone: outboundRecipientInfo.Phone || { Number: '9999999999' },
                                 Address: outboundRecipientInfo.Address
                             },
-                            // Bill to WC account
-                            PaymentInformation: {
-                                ShipmentCharge: {
-                                    Type: '01',
-                                    BillShipper: {
-                                        AccountNumber: wcAccountNumber
-                                    }
-                                }
-                            },
+                            PaymentInformation: buildPaymentInformation(isBillToThirdParty, mappingRecord, wcAccountNumber, thirdPartyAccountNumber),
                             Service: {
                                 Code: '03', // UPS Ground for returns
                                 Description: 'UPS Ground'
