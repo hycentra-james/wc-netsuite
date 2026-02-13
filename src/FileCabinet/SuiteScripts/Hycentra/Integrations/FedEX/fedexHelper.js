@@ -2438,8 +2438,51 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     }
                 }
 
-                // Make API call
-                var response = postToApi(bearerToken, apiUrl, JSON.stringify(payload));
+                // Make API call with Saturday Delivery retry logic
+                var response;
+                try {
+                    response = postToApi(bearerToken, apiUrl, JSON.stringify(payload));
+                } catch (apiError) {
+                    // Check if error is due to SATURDAY_DELIVERY not supported at destination
+                    var errorMessage = apiError.message || '';
+                    var isSaturdayDeliveryError = false;
+
+                    // Parse error to check for Saturday Delivery issue
+                    if (errorMessage.indexOf('SATURDAY_DELIVERY') > -1 &&
+                        (errorMessage.indexOf('NOT.SUPPORTED') > -1 || errorMessage.indexOf('not supported') > -1)) {
+                        isSaturdayDeliveryError = true;
+                        log.audit('Saturday Delivery Retry', 'SATURDAY_DELIVERY not supported at destination - retrying without it');
+                    }
+
+                    if (isSaturdayDeliveryError && payload.requestedShipment.shipmentSpecialServices) {
+                        // Remove SATURDAY_DELIVERY from special services and retry
+                        var specialServices = payload.requestedShipment.shipmentSpecialServices.specialServiceTypes || [];
+                        var filteredServices = [];
+
+                        for (var i = 0; i < specialServices.length; i++) {
+                            if (specialServices[i] !== 'SATURDAY_DELIVERY') {
+                                filteredServices.push(specialServices[i]);
+                            }
+                        }
+
+                        if (filteredServices.length > 0) {
+                            payload.requestedShipment.shipmentSpecialServices.specialServiceTypes = filteredServices;
+                            log.debug('Saturday Delivery Retry', 'Removed SATURDAY_DELIVERY, remaining services: ' + filteredServices.join(', '));
+                        } else {
+                            // No special services left, remove the entire section
+                            delete payload.requestedShipment.shipmentSpecialServices;
+                            log.debug('Saturday Delivery Retry', 'Removed all special services (only SATURDAY_DELIVERY was present)');
+                        }
+
+                        // Retry the API call without SATURDAY_DELIVERY
+                        log.audit('Saturday Delivery Retry', 'Retrying shipment without SATURDAY_DELIVERY');
+                        response = postToApi(bearerToken, apiUrl, JSON.stringify(payload));
+                        log.audit('Saturday Delivery Retry', 'Retry successful - shipment created without Saturday Delivery');
+                    } else {
+                        // Not a Saturday Delivery error, or no special services to modify - re-throw
+                        throw apiError;
+                    }
+                }
 
                 log.audit('FedEx Response', 'Status: ' + response.status);
                 log.debug('FedEx Response Body', JSON.stringify(response.result, null, 2));

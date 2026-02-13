@@ -1973,7 +1973,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                 Name: outboundRecipientInfo.Name || 'Customer',
                                 AttentionName: outboundRecipientInfo.AttentionName || outboundRecipientInfo.Name || 'Customer',
                                 Phone: outboundRecipientInfo.Phone || { Number: '9999999999' },
-                                ShipperNumber: isBillToThirdParty ? thirdPartyAccountNumber : wcAccountNumber,
+                                ShipperNumber: wcAccountNumber, // Always use WC account for authorization (billing handled by PaymentInformation)
                                 Address: outboundRecipientInfo.Address
                             },
                             // Williams Sonoma return center is the destination
