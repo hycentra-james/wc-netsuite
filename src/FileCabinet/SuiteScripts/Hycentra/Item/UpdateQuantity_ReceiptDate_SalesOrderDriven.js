@@ -886,25 +886,50 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 return inventory;
             }
 
-            // Use inventory balance search to get available quantities
+            // Use item search with locationquantityavailable to ensure committed quantities are subtracted
+            // locationquantityavailable = On Hand - Committed (accounts for orders)
             var inventorySearch = search.create({
-                type: "inventorybalance",
+                type: "item",
                 filters: [
-                    ["item", "anyof", memberIds],
+                    ["internalid", "anyof", memberIds],
                     "AND",
-                    ["location", "anyof", "1"] // Main location - adjust if needed
+                    ["inventorylocation", "anyof", "1"] // Main location - adjust if needed
                 ],
                 columns: [
-                    search.createColumn({ name: "item", summary: "GROUP" }),
-                    search.createColumn({ name: "available", summary: "SUM" })
+                    search.createColumn({
+                        name: "internalid",
+                        summary: "GROUP",
+                        label: "Item ID"
+                    }),
+                    search.createColumn({
+                        name: "locationquantityavailable",
+                        summary: "SUM",
+                        label: "Available (On Hand - Committed)"
+                    }),
+                    search.createColumn({
+                        name: "locationquantityonhand",
+                        summary: "SUM",
+                        label: "On Hand"
+                    })
                 ]
             });
 
             inventorySearch.run().each(function(result) {
-                var itemId = result.getValue({ name: "item", summary: "GROUP" });
-                var qty = parseFloat(result.getValue({ name: "available", summary: "SUM" })) || 0;
-                
-                inventory[itemId] = qty;
+                var itemId = result.getValue({ name: "internalid", summary: "GROUP" });
+                var availableQty = parseFloat(result.getValue({ name: "locationquantityavailable", summary: "SUM" })) || 0;
+                var onHandQty = parseFloat(result.getValue({ name: "locationquantityonhand", summary: "SUM" })) || 0;
+
+                inventory[itemId] = availableQty;
+
+                // Log inventory details for verification (first 5 items to avoid log bloat)
+                if (Object.keys(inventory).length <= 5) {
+                    log.debug('Member item inventory', {
+                        'itemId': itemId,
+                        'availableQty': availableQty,
+                        'onHandQty': onHandQty,
+                        'committed': onHandQty - availableQty
+                    });
+                }
 
                 return true;
             });
