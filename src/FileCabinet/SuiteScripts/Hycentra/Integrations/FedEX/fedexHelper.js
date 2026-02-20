@@ -20,8 +20,23 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         const ONE_RATE_SHIP_METHOD_IDS = [14686, 14075]; // FedEx One Rate Envelope, FedEx One Rate Pak
 
         // Module-level variable to store test mode flag
-        // Auto-detect based on NetSuite environment (sandbox vs production)
-        var IS_TEST_MODE = (runtime.envType === runtime.EnvType.SANDBOX);
+        // Will be set by createShipment() or auto-detected from runtime environment when needed
+        var IS_TEST_MODE = null;
+
+        /**
+         * Get the current test mode flag
+         * Returns override value if set, otherwise auto-detects from runtime environment
+         *
+         * @returns {boolean} True if in test/sandbox mode, false otherwise
+         */
+        function getTestMode() {
+            // If IS_TEST_MODE has been explicitly set (e.g., by createShipment), use that value
+            if (IS_TEST_MODE !== null) {
+                return IS_TEST_MODE;
+            }
+            // Otherwise, auto-detect from runtime environment
+            return (runtime.envType === runtime.EnvType.SANDBOX);
+        }
 
         /**
          * Get the current config record ID based on test mode
@@ -61,7 +76,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                     // If no endpoint configured, use appropriate default based on test mode
                     if (!endpoint) {
-                        endpoint = IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                        endpoint = getTestMode() ? SANDBOX_URL : PRODUCTION_URL;
                         log.debug('DEBUG', 'No endpoint configured, using default: ' + endpoint);
                     }
 
@@ -74,7 +89,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     log.debug('DEBUG', 'getApiUrl()::returning endpoint = ' + endpoint);
                     return endpoint;
                 } else {
-                    var defaultUrl = IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                    var defaultUrl = getTestMode() ? SANDBOX_URL : PRODUCTION_URL;
                     log.debug('DEBUG', 'Empty token record, using default: ' + defaultUrl);
                     return defaultUrl;
                 }
@@ -84,7 +99,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     details: 'Error getting API URL, using default: ' + e.message
                 });
                 // Fallback based on test mode
-                return IS_TEST_MODE ? SANDBOX_URL : PRODUCTION_URL;
+                return getTestMode() ? SANDBOX_URL : PRODUCTION_URL;
             }
         }
 
@@ -815,8 +830,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     
                     if (thirdPartyBillAddrJson) {
                         var thirdPartyInfo = JSON.parse(thirdPartyBillAddrJson);
-                        
-                        log.debug('DEBUG', 'buildShippingChargesPayment()::IS_TEST_MODE = ' + IS_TEST_MODE);
+
+                        log.debug('DEBUG', 'buildShippingChargesPayment()::IS_TEST_MODE = ' + getTestMode());
                         log.debug('DEBUG', 'buildShippingChargesPayment()::billingAccountNumber = ' + billingAccountNumber);
                         
                         return {
@@ -884,12 +899,12 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         message: 'FedEx account number not configured in settings or mapping for third party billing'
                     });
                 }
-                
+
                 // Use wcAccountNumber in test mode, otherwise use accountNumber
-                var billingAccountNumber = IS_TEST_MODE ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
-                
+                var billingAccountNumber = getTestMode() ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
+
                 // Get dynamic account number for API (separate from billing)
-                //var apiAccountNumber = IS_TEST_MODE ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
+                //var apiAccountNumber = getTestMode() ? wcAccountNumber : getDynamicAccountNumber(fulfillmentRecord, mappingRecord);
                 log.debug('Billing Account Numbers', 'wcAccountNumber: ' + wcAccountNumber + ', Billing Account: ' + billingAccountNumber);
 
                 // Get ship method mapping once for both service type and packaging type
