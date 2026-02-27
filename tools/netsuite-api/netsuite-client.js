@@ -16,8 +16,8 @@ const CONFIG = {
     accountId: '6511399',
     clientId: '9199cae528a9759f4e8fcd33dde07f79257436116c08b3502cf3df3eecb1b532',
     certificateId: 'l0zS7h1RPMBngCqoaP0gGvxWWWKdV9MJUAZEsqiv9s0',
-    scriptId: '2111',
-    deployId: '1',
+    scriptId: 'customscript_hyc_claude_code_api_rl',
+    deployId: 'customdeploy_hyc_claude_code_api_r',
     // Paths to key files (relative to this script)
     privateKeyPath: path.join(__dirname, 'private.pem'),
     // Token endpoint
