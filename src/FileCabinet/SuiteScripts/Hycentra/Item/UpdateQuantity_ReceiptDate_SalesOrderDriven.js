@@ -74,17 +74,16 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 addUniqueItems(fulfillmentItems);
                 addUniqueItems(receiptItems);
 
-                // Step 3: Find kits that contain any of the inventory items from IF/Receipt
+                // Step 3: Find kits that contain any of the inventory items from SO/IF/Receipt
                 // This ensures kit quantities are updated when their components change
+                // NOTE: Sales Orders are included because they commit inventory (reduce locationquantityavailable)
                 var inventoryItemsFromEvents = [];
-                for (var i = 0; i < fulfillmentItems.length; i++) {
-                    if (inventoryItemsFromEvents.indexOf(fulfillmentItems[i]) === -1) {
-                        inventoryItemsFromEvents.push(fulfillmentItems[i]);
-                    }
-                }
-                for (var j = 0; j < receiptItems.length; j++) {
-                    if (inventoryItemsFromEvents.indexOf(receiptItems[j]) === -1) {
-                        inventoryItemsFromEvents.push(receiptItems[j]);
+                var allEventSources = [salesOrderItems, fulfillmentItems, receiptItems];
+                for (var s = 0; s < allEventSources.length; s++) {
+                    for (var i = 0; i < allEventSources[s].length; i++) {
+                        if (inventoryItemsFromEvents.indexOf(allEventSources[s][i]) === -1) {
+                            inventoryItemsFromEvents.push(allEventSources[s][i]);
+                        }
                     }
                 }
 
@@ -886,6 +885,12 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 return inventory;
             }
 
+            // Pre-populate all members with 0 so items with no inventory record
+            // at location 1 are explicitly treated as zero rather than relying on || 0 fallback
+            for (var i = 0; i < memberIds.length; i++) {
+                inventory[memberIds[i]] = 0;
+            }
+
             // Use item search with locationquantityavailable to ensure committed quantities are subtracted
             // locationquantityavailable = On Hand - Committed (accounts for orders)
             var inventorySearch = search.create({
@@ -914,15 +919,17 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 ]
             });
 
+            var itemsFoundInSearch = 0;
             inventorySearch.run().each(function(result) {
                 var itemId = result.getValue({ name: "internalid", summary: "GROUP" });
                 var availableQty = parseFloat(result.getValue({ name: "locationquantityavailable", summary: "SUM" })) || 0;
                 var onHandQty = parseFloat(result.getValue({ name: "locationquantityonhand", summary: "SUM" })) || 0;
 
-                inventory[itemId] = availableQty;
+                inventory[itemId] = availableQty;  // Overwrite the 0 pre-population with actual value
+                itemsFoundInSearch++;
 
                 // Log inventory details for verification (first 5 items to avoid log bloat)
-                if (Object.keys(inventory).length <= 5) {
+                if (itemsFoundInSearch <= 5) {
                     log.debug('Member item inventory', {
                         'itemId': itemId,
                         'availableQty': availableQty,
@@ -933,6 +940,20 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
 
                 return true;
             });
+
+            // Log any members that had no inventory record at location 1 (remained at 0)
+            var missingItems = [];
+            for (var j = 0; j < memberIds.length; j++) {
+                if (inventory[memberIds[j]] === 0) {
+                    missingItems.push(memberIds[j]);
+                }
+            }
+            if (missingItems.length > 0) {
+                log.debug('Member items with zero or no inventory at location 1', {
+                    'count': missingItems.length,
+                    'memberIds': missingItems.slice(0, 10).join(', ') + (missingItems.length > 10 ? '...' : '')
+                });
+            }
 
             return inventory;
         }
