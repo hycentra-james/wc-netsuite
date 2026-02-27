@@ -1,0 +1,6 @@
+# Private keys - DO NOT COMMIT
+private.pem
+public.pem
+
+# Node modules
+node_modules/

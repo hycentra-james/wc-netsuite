@@ -238,6 +238,34 @@ define(['N/record', 'N/search', 'N/log'], (record, search, log) => {
 - Rate Quote API - get shipping costs
 - Ship API - create shipping labels
 
+### NetSuite API Client
+- **Location:** `tools/netsuite-api/`
+- **Auth:** OAuth 2.0 M2M (Client Credentials)
+- **RESTlet:** Script 2111, Deploy 1
+
+**Quick Commands:**
+```bash
+cd tools/netsuite-api
+
+# Test connection
+node netsuite-client.js ping
+
+# SuiteQL query
+node netsuite-client.js suiteql "SELECT id, companyname FROM customer FETCH FIRST 10 ROWS ONLY"
+
+# Get record
+node netsuite-client.js getRecord salesorder 12345
+
+# Lookup fields
+node netsuite-client.js lookup customer 330 companyname email
+```
+
+**Common Queries:**
+- Customers: `SELECT id, companyname, email FROM customer WHERE isinactive = 'F'`
+- Sales Orders: `SELECT id, tranid, entity, total FROM transaction WHERE type = 'SalesOrd'`
+- Items: `SELECT id, itemid, displayname FROM item WHERE isinactive = 'F'`
+- Inventory: `SELECT item, location, quantityavailable FROM inventorybalance`
+
 ---
 
 ## Agent Configuration
@@ -253,6 +281,7 @@ This workspace has a custom NetSuite expert agent:
 
 | Resource | Location |
 |----------|----------|
+| NetSuite API Client | `tools/netsuite-api/README.md` |
 | Hycentra Master Brain | `/Users/james/Documents/customers/hycentra/agent_team/CLAUDE.md` |
 | NetSuite Development Guide | `AGENTS.md` (this repo) |
 | FedEx Address Validation Spec | `src/.../FedEX/FedExAddressValidation_Requirements.md` |
@@ -263,6 +292,7 @@ This workspace has a custom NetSuite expert agent:
 
 | Date | Change |
 |------|--------|
+| 2026-02-26 | Added NetSuite API client with OAuth 2.0 M2M authentication |
 | 2025-01-12 | Initial CLAUDE.md creation |
 | 2025-01-07 | FedEx Address Validation v1.3 - EDI ship method respect |
 | 2025-12-26 | FedEx Address Validation v1.0 - Initial implementation |

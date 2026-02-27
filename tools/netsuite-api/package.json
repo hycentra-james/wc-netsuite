@@ -1,0 +1,17 @@
+{
+  "name": "netsuite-api",
+  "version": "1.0.0",
+  "description": "This folder contains tools for Claude Code to access NetSuite data via the SuiteTalk REST API with TBA authentication.",
+  "main": "netsuite-client.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "crypto-js": "^4.2.0",
+    "oauth-1.0a": "^2.2.6"
+  }
+}
