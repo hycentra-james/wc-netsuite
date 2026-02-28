@@ -917,7 +917,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     "requestedShipment": {
                         "shipper": buildShipperInfo(fulfillmentRecord, mappingRecord),
                         "recipients": [buildRecipientInfo(fulfillmentRecord)],
-                        "shipDatestamp": getCurrentDateString(),
+                        "shipDatestamp": isOneRateShipment(shipMethodMapping) ? getNextBusinessDateString() : getCurrentDateString(),
                         "serviceType": getServiceType(fulfillmentRecord, shipMethodMapping),
                         "packagingType": getPackagingType(fulfillmentRecord, shipMethodMapping),
                         "pickupType": "USE_SCHEDULED_PICKUP",
@@ -2191,6 +2191,48 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Get next business date in YYYY-MM-DD format for One Rate shipments
+         * Advances past 3pm PT cutoff, then skips weekends (Sat/Sun) to land on a weekday.
+         * Examples:
+         *   - Friday after 3pm PT  → Monday
+         *   - Saturday (any time)  → Monday
+         *   - Sunday (any time)    → Monday
+         *   - Thursday after 3pm  → Friday
+         *
+         * @returns {string} Next business date string
+         */
+        function getNextBusinessDateString() {
+            // Get current time in Pacific timezone
+            var now = new Date();
+            var pacificTimeString = now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+            var pacificTime = new Date(pacificTimeString);
+            var currentHour = pacificTime.getHours();
+
+            var shipDate = new Date();
+
+            // If after 3pm PT (15:00), advance to next day
+            if (currentHour >= 15) {
+                shipDate.setDate(shipDate.getDate() + 1);
+            }
+
+            // Skip weekends — Saturday (6) and Sunday (0) — to land on Monday
+            while (shipDate.getDay() === 0 || shipDate.getDay() === 6) {
+                shipDate.setDate(shipDate.getDate() + 1);
+            }
+
+            // Format as YYYY-MM-DD
+            var year = shipDate.getFullYear();
+            var month = String(shipDate.getMonth() + 1).padStart(2, '0');
+            var day = String(shipDate.getDate()).padStart(2, '0');
+
+            var shipDateString = year + '-' + month + '-' + day;
+
+            log.debug('getNextBusinessDateString', 'Pacific Hour: ' + currentHour + ', Ship Date: ' + shipDateString);
+
+            return shipDateString;
+        }
+
+        /**
          * Get current date in YYYYMMDD format for filename
          *
          * @returns {string} Current date string for filename
@@ -2939,6 +2981,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getFedExServiceCode: getFedExServiceCode,
             getShipMethodMappingById: getShipMethodMappingById,
             getCurrentDateString: getCurrentDateString,
+            getNextBusinessDateString: getNextBusinessDateString,
             getShippingLabelMapping: getShippingLabelMapping,
             validatePhoneNumber: validatePhoneNumber,
             createShipment: createShipment,
