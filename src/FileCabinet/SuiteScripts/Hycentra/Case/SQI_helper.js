@@ -131,19 +131,15 @@ define(['N/record', 'N/log', 'N/search'],
                     for (var i = 0; i < lotNumbers.length; i++) {
                         var poNumberLookup = "PO" + lotNumbers[i];
 
-                        // Search for PO that contains this item
+                        // Step 1: Find the PO by tranid (header-level, no item filter)
                         var purchaseOrderSearch = search.create({
                             type: search.Type.PURCHASE_ORDER,
                             filters: [
                                 ['tranid', search.Operator.IS, poNumberLookup],
                                 'and',
-                                ['item', search.Operator.ANYOF, lookupItemId],
-                                'and',
-                                ['mainline', search.Operator.IS, 'F'],
-                                'and',
-                                ['taxline', search.Operator.IS, 'F']
+                                ['mainline', search.Operator.IS, 'T']
                             ],
-                            columns: ['internalid', 'tranid', 'entity', 'rate']
+                            columns: ['internalid', 'tranid', 'entity']
                         });
 
                         var purchaseOrderRS = purchaseOrderSearch.run().getRange({ start: 0, end: 1 });
@@ -160,19 +156,17 @@ define(['N/record', 'N/log', 'N/search'],
                                 value: purchaseOrderRS[0].getValue({ name: 'entity' })
                             });
 
-                            var unitCost = parseFloat(purchaseOrderRS[0].getValue({ name: 'rate' })) || 0;
-                            if (unitCost) {
-                                log.debug('populateItemInfo', 'Found unit cost: ' + unitCost + ' for item: ' + lookupItemId + ' in PO: ' + poNumberLookup);
+                            // Step 2: Look up the item's unit cost on this PO
+                            var unitCost = getItemUnitCostFromPO(poInternalId, lookupItemId);
+                            if (unitCost !== null) {
                                 currentRecord.setValue({
                                     fieldId: 'custrecord_hyc_sqi_issue_item_unit_cost',
                                     value: unitCost
                                 });
                             }
 
-                            break; // Found a matching PO with this item — stop looking
+                            break; // Found a matching PO — stop looking
                         }
-
-                        log.debug('populateItemInfo', 'No match for item: ' + lookupItemId + ' in PO: ' + poNumberLookup);
                     }
 
                     return;
