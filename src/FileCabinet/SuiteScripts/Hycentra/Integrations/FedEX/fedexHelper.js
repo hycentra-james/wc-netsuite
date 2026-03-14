@@ -776,8 +776,19 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 if (customerId == 329) {
                     log.debug('Dynamic Account', 'Wayfair customer detected, checking PO prefix logic');
                     
-                    // Get PO number from fulfillment record
+                    // Get PO number from fulfillment record, fall back to SO otherrefnum
                     var poNumber = fulfillmentRecord.getValue({ fieldId: 'custbody_sd_customer_po_no' });
+                    if (!poNumber) {
+                        var salesOrderId = fulfillmentRecord.getValue({ fieldId: 'createdfrom' });
+                        if (salesOrderId) {
+                            poNumber = search.lookupFields({
+                                type: search.Type.SALES_ORDER,
+                                id: salesOrderId,
+                                columns: ['otherrefnum']
+                            }).otherrefnum;
+                            log.debug('Dynamic Account', 'custbody_sd_customer_po_no empty, using otherrefnum from SO ' + salesOrderId + ': ' + poNumber);
+                        }
+                    }
                     log.debug('Dynamic Account', 'PO Number: ' + poNumber);
                     
                     if (poNumber) {
@@ -2335,15 +2346,11 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     folder: getFedExLabelFolderId() // Get or create the FedEx Label folder
                 });
 
-                // Save the file
+                // Save the file, then load to get URL (.url is null on unsaved/newly-created files)
                 var fileId = fileObj.save();
-                log.debug('DEBUG', 'Label saved to file cabinet with ID: ' + fileId);
-
-                // Generate the NetSuite file URL
-                var fileRecord = file.load({ id: fileId });
-                var fileUrl = fileRecord.url;
-
-                log.debug('DEBUG', 'File URL: ' + fileUrl);
+                var savedFile = file.load({ id: fileId });
+                var fileUrl = savedFile.url;
+                log.debug('DEBUG', 'Label saved to file cabinet with ID: ' + fileId + ', URL: ' + fileUrl);
                 return fileUrl;
 
             } catch (e) {
@@ -2354,10 +2361,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
         /**
          * Get or create the FedEx Label folder ID
+         * Cached after first lookup to avoid repeated searches on multi-package shipments
          *
          * @returns {number} Folder ID
          */
+        var _cachedFedExLabelFolderId = null;
         function getFedExLabelFolderId() {
+            if (_cachedFedExLabelFolderId) {
+                return _cachedFedExLabelFolderId;
+            }
             try {
                 // Try to find existing folder first
                 var folderSearch = search.create({
@@ -2371,9 +2383,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var searchResults = folderSearch.run().getRange({ start: 0, end: 1 });
 
                 if (searchResults && searchResults.length > 0) {
-                    var folderId = searchResults[0].getValue('internalid');
-                    log.debug('DEBUG', 'Found existing FedEx Label folder with ID: ' + folderId);
-                    return folderId;
+                    _cachedFedExLabelFolderId = searchResults[0].getValue('internalid');
+                    log.debug('DEBUG', 'Found existing FedEx Label folder with ID: ' + _cachedFedExLabelFolderId);
+                    return _cachedFedExLabelFolderId;
                 }
 
                 // Create folder if it doesn't exist
@@ -2385,9 +2397,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 folderRecord.setValue({ fieldId: 'name', value: 'FedEx Label' });
                 // Set parent to File Cabinet root (leave parent empty for root level)
 
-                var newFolderId = folderRecord.save();
-                log.debug('DEBUG', 'Created FedEx Label folder with ID: ' + newFolderId);
-                return newFolderId;
+                _cachedFedExLabelFolderId = folderRecord.save();
+                log.debug('DEBUG', 'Created FedEx Label folder with ID: ' + _cachedFedExLabelFolderId);
+                return _cachedFedExLabelFolderId;
 
             } catch (e) {
                 log.error('ERROR', 'Failed to get/create FedEx Label folder: ' + e.message);
@@ -2550,16 +2562,17 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var transactionId = '';
                 var alertsJson = '';
 
-                // Get sales order number for filename
+                // Get sales order number for filename (lookupFields saves ~8 units vs record.load)
                 var salesOrderNumber = '';
                 try {
                     var salesOrderId = fulfillmentRecord.getValue({ fieldId: 'createdfrom' });
                     if (salesOrderId) {
-                        var salesOrderRecord = record.load({
-                            type: record.Type.SALES_ORDER,
-                            id: salesOrderId
+                        var soFields = search.lookupFields({
+                            type: search.Type.SALES_ORDER,
+                            id: salesOrderId,
+                            columns: ['tranid']
                         });
-                        salesOrderNumber = salesOrderRecord.getValue({ fieldId: 'tranid' }) || salesOrderId.toString();
+                        salesOrderNumber = soFields.tranid || salesOrderId.toString();
                         log.debug('DEBUG', 'Sales Order Number for filename: ' + salesOrderNumber);
                     }
                 } catch (e) {
@@ -2618,22 +2631,13 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     log.audit('Label Download Failed', 'Storing original FedEx URLs for retry: ' + originalLabelUrlString);
                 }
 
-                var printFedExLabelsStartTime = Date.now();
-                // Print the labels
-                printFedExLabels(labelUrlString);
-                var printFedExLabelsEndTime = Date.now();
-                var fromStartToPrintExecutionTime = printFedExLabelsEndTime - startTime;
-                var printFedExLabelsExecutionTime = printFedExLabelsEndTime - printFedExLabelsStartTime;
-                log.debug('PERFORMANCE', 'printFedExLabels()::fromStartToPrintExecutionTime completed successfully in ' + fromStartToPrintExecutionTime + 'ms (' + (fromStartToPrintExecutionTime / 1000).toFixed(2) + ' seconds)');
-                log.debug('PERFORMANCE', 'printFedExLabels()::printFedExLabelsExecutionTime completed successfully in ' + printFedExLabelsExecutionTime + 'ms (' + (printFedExLabelsExecutionTime / 1000).toFixed(2) + ' seconds)');
-
                 log.debug('FedEx Response Processing', 'Tracking: ' + trackingNumber +
                     ', Labels: ' + labelUrlString +
                     ', Transaction ID: ' + transactionId +
                     ', Alerts: ' + alertsJson);
 
-                // Update the fulfillment record with results (in test mode, just log)
-                
+                // Update the fulfillment record with results BEFORE printing (critical path first)
+
                 // For non-test mode, update the actual record with generic fields
                 var updateValues = {
                     custbody_shipping_label_url: labelUrlString,
@@ -2675,7 +2679,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                      log.error('ERROR', 'Failed to update Item Fulfillment status to Shipped: ' + statusError.message);
                      // Don't throw error - leave status as is and continue
                  }
-            
+
                 // In test mode, just log the values that would be updated
                 log.audit('Test Mode - Would Update Fields', JSON.stringify({
                     custbody_shipping_label_url: labelUrlString,
@@ -2684,6 +2688,13 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     custbody_shipping_error_message: alertsJson,
                     packagetrackingnumber: trackingNumber
                 }));
+
+                // Print labels AFTER record updates (non-critical, can be retried manually)
+                try {
+                    printFedExLabels(labelUrlString);
+                } catch (printError) {
+                    log.error('FedEx Label Print', 'Printing failed (labels saved, record updated): ' + printError.message);
+                }
 
                 // Calculate and log execution time - SUCCESS case
                 var endTime = Date.now();
