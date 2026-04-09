@@ -355,6 +355,126 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * PUT call to the FedEx API
+         *
+         * @param {string} token Bearer token for authentication
+         * @param {string} url The URL at which to make the PUT request
+         * @param {string} json The JSON string to send
+         * @returns {Object} The API response, containing status and result
+         */
+        function putToApi(token, url, json) {
+            var retries = 3;
+            var success = false;
+            var response;
+
+            while (retries > 0 && success === false) {
+                try {
+                    response = https.request({
+                        method: 'PUT',
+                        url: url,
+                        body: json,
+                        headers: {
+                            'Authorization': 'Bearer ' + token,
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'X-locale': 'en_US'
+                        }
+                    });
+                    success = true;
+                } catch (e) {
+                    retries--;
+                    log.error('ERROR', 'FedEx API PUT attempt failed: ' + e.message);
+                    if (retries === 0) {
+                        throw e;
+                    }
+                    // Wait 1 second before retry
+                    var start = new Date().getTime();
+                    while (new Date().getTime() < start + 1000) {
+                        // Wait
+                    }
+                }
+            }
+
+            log.debug('DEBUG', 'FedEx API PUT success = ' + success);
+            log.debug('DEBUG', 'FedEx API PUT response.code = ' + response.code);
+            log.debug('DEBUG', 'FedEx API PUT response.body = ' + response.body);
+
+            var result = response.body;
+
+            // Try to parse the result into JSON
+            try {
+                result = JSON.parse(result);
+            } catch (e) {
+                log.debug('DEBUG', 'FedEx API PUT response.body is not JSON formatted string');
+            }
+
+            return {
+                status: response.code,
+                result: result
+            };
+        }
+
+        /**
+         * Cancel a FedEx shipment by tracking number
+         *
+         * @param {string} trackingNumber The tracking number to cancel
+         * @returns {Object} Result with success, message, and response
+         */
+        function cancelShipment(trackingNumber) {
+            try {
+                log.audit('Cancel Shipment', 'Cancelling FedEx shipment: ' + trackingNumber);
+
+                // Get authenticated token
+                var tokenRecord = getTokenRecord();
+                var token = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' });
+                var accountNumber = tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_account_number' });
+
+                // Build cancel payload
+                var payload = JSON.stringify({
+                    accountNumber: {
+                        value: accountNumber
+                    },
+                    trackingNumber: trackingNumber,
+                    senderCountryCode: 'US',
+                    emailShipment: false
+                });
+
+                // Call FedEx cancel endpoint
+                var apiUrl = getApiUrl() + 'ship/v1/shipments/cancel';
+                log.debug('Cancel Shipment', 'Calling FedEx cancel API: ' + apiUrl);
+
+                var response = putToApi(token, apiUrl, payload);
+
+                if (response.status >= 200 && response.status < 300) {
+                    log.audit('Cancel Shipment', 'FedEx shipment cancelled successfully: ' + trackingNumber);
+                    return {
+                        success: true,
+                        message: 'FedEx shipment ' + trackingNumber + ' cancelled successfully.',
+                        response: response.result
+                    };
+                } else {
+                    var errorMsg = 'FedEx cancel failed with status ' + response.status;
+                    if (response.result && response.result.errors) {
+                        errorMsg += ': ' + JSON.stringify(response.result.errors);
+                    }
+                    log.error('Cancel Shipment', errorMsg);
+                    return {
+                        success: false,
+                        message: errorMsg,
+                        response: response.result
+                    };
+                }
+            } catch (e) {
+                log.error('Cancel Shipment', 'Error cancelling FedEx shipment: ' + e.message);
+                return {
+                    success: false,
+                    message: 'Error cancelling FedEx shipment: ' + e.message,
+                    response: null
+                };
+            }
+        }
+
+        /**
          * Get shipping label mapping record for the fulfillment
          *
          * @param {record} fulfillmentRecord The Item Fulfillment record
@@ -2997,7 +3117,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             validatePhoneNumber: validatePhoneNumber,
             createShipment: createShipment,
             printFedExLabels: printFedExLabels,
-            retryLabelDownload: retryLabelDownload
+            retryLabelDownload: retryLabelDownload,
+            putToApi: putToApi,
+            cancelShipment: cancelShipment
         };
     }
 ); 

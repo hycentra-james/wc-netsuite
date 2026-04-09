@@ -28,8 +28,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         };
 
         // Module-level variable to store test mode flag
-        // Auto-detect based on NetSuite environment (sandbox vs production)
-        var IS_TEST_MODE = (runtime.envType === runtime.EnvType.SANDBOX);
+        // Will be set by setTestMode() or auto-detected from runtime environment when needed
+        var IS_TEST_MODE = null;
 
         /**
          * Set test mode flag (overrides auto-detected environment)
@@ -43,11 +43,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
         /**
          * Get current test mode flag
+         * Returns override value if set, otherwise auto-detects from runtime environment
          *
          * @returns {boolean} Current test mode value
          */
         function getTestMode() {
-            return IS_TEST_MODE;
+            if (IS_TEST_MODE !== null) {
+                return IS_TEST_MODE;
+            }
+            return (runtime.envType === runtime.EnvType.SANDBOX);
         }
 
         /**
@@ -56,7 +60,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @returns {number} Config record ID
          */
         function getCurrentConfigRecordId() {
-            return IS_TEST_MODE ? SANDBOX_CONFIG_RECORD_ID : PRODUCTION_CONFIG_RECORD_ID;
+            return getTestMode() ? SANDBOX_CONFIG_RECORD_ID : PRODUCTION_CONFIG_RECORD_ID;
         }
 
         /**
@@ -401,6 +405,117 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 status: response.code,
                 result: result
             };
+        }
+
+        /**
+         * DELETE call to the UPS API
+         *
+         * @param {string} token Bearer token for authentication
+         * @param {string} apiUrl The URL at which to make the DELETE request
+         * @returns {Object} The API response, containing status and result
+         */
+        function deleteFromApi(token, apiUrl) {
+            var retries = 3;
+            var success = false;
+            var response;
+
+            while (retries > 0 && success === false) {
+                try {
+                    response = https.request({
+                        method: 'DELETE',
+                        url: apiUrl,
+                        headers: {
+                            'Authorization': 'Bearer ' + token,
+                            'Accept': 'application/json',
+                            'transId': 'cancel_' + new Date().getTime(),
+                            'transactionSrc': 'testing'
+                        }
+                    });
+                    success = true;
+                } catch (e) {
+                    retries--;
+                    log.error('ERROR', 'UPS API DELETE attempt failed: ' + e.message);
+                    if (retries === 0) {
+                        throw e;
+                    }
+                    var start = new Date().getTime();
+                    while (new Date().getTime() < start + 1000) {
+                        // Wait
+                    }
+                }
+            }
+
+            log.debug('DEBUG', 'UPS API DELETE success = ' + success);
+            log.debug('DEBUG', 'UPS API DELETE response.code = ' + response.code);
+            log.debug('DEBUG', 'UPS API DELETE response.body = ' + response.body);
+
+            var result = response.body;
+
+            try {
+                result = JSON.parse(result);
+            } catch (e) {
+                log.debug('DEBUG', 'UPS API DELETE response.body is not JSON formatted string');
+            }
+
+            return {
+                status: response.code,
+                result: result
+            };
+        }
+
+        /**
+         * Cancel/void a UPS shipment by tracking number
+         *
+         * @param {string} trackingNumber The master/primary tracking number
+         * @param {string} [additionalTrackingNumbers] Comma-separated additional tracking numbers for multi-package void
+         * @returns {Object} Result with success, message, and response
+         */
+        function cancelShipment(trackingNumber, additionalTrackingNumbers) {
+            try {
+                log.audit('Cancel Shipment', 'Cancelling UPS shipment: ' + trackingNumber +
+                    (additionalTrackingNumbers ? ', additional: ' + additionalTrackingNumbers : ''));
+
+                // Get authenticated token
+                var tokenRecord = getTokenRecord();
+                var token = tokenRecord.getValue({ fieldId: 'custrecord_hyc_ups_access_token' });
+
+                // Build void URL
+                var apiUrl = getApiUrl() + 'api/shipments/v2409/void/cancel/' + trackingNumber;
+                if (additionalTrackingNumbers) {
+                    apiUrl += '?trackingnumber=' + additionalTrackingNumbers.replace(/\s/g, '');
+                }
+
+                log.debug('Cancel Shipment', 'Calling UPS void API: ' + apiUrl);
+
+                var response = deleteFromApi(token, apiUrl);
+
+                if (response.status >= 200 && response.status < 300) {
+                    log.audit('Cancel Shipment', 'UPS shipment voided successfully: ' + trackingNumber);
+                    return {
+                        success: true,
+                        message: 'UPS shipment ' + trackingNumber + ' voided successfully.',
+                        response: response.result
+                    };
+                } else {
+                    var errorMsg = 'UPS void failed with status ' + response.status;
+                    if (response.result && response.result.response && response.result.response.errors) {
+                        errorMsg += ': ' + JSON.stringify(response.result.response.errors);
+                    }
+                    log.error('Cancel Shipment', errorMsg);
+                    return {
+                        success: false,
+                        message: errorMsg,
+                        response: response.result
+                    };
+                }
+            } catch (e) {
+                log.error('Cancel Shipment', 'Error voiding UPS shipment: ' + e.message);
+                return {
+                    success: false,
+                    message: 'Error voiding UPS shipment: ' + e.message,
+                    response: null
+                };
+            }
         }
 
         /**
@@ -2484,6 +2599,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getUPSLabelFolderId: getUPSLabelFolderId,
             printUPSLabels: printUPSLabels,
             updateMultiplePackageTrackingNumbers: updateMultiplePackageTrackingNumbers,
+            deleteFromApi: deleteFromApi,
+            cancelShipment: cancelShipment,
             // Pottery Barn return label functions
             isPotteryBarnOrder: isPotteryBarnOrder,
             buildReturnShipmentPayload: buildReturnShipmentPayload,
