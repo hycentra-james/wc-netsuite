@@ -23,6 +23,7 @@ define(['N/record', 'N/log', './fedexHelper'],
 
             try {
                 var fulfillmentId = context.request.parameters.ifid;
+                var skipDownload = context.request.parameters.skipDownload === 'T';
 
                 if (!fulfillmentId) {
                     response.message = 'Missing Item Fulfillment ID parameter (ifid)';
@@ -30,7 +31,7 @@ define(['N/record', 'N/log', './fedexHelper'],
                     return;
                 }
 
-                log.audit('FedEx Re-create Shipment', 'Starting re-create for Item Fulfillment: ' + fulfillmentId);
+                log.audit('FedEx Re-create Shipment', 'Starting re-create for Item Fulfillment: ' + fulfillmentId + (skipDownload ? ' (skip download mode)' : ''));
 
                 // Load the fulfillment record
                 var fulfillmentRecord = record.load({
@@ -43,13 +44,15 @@ define(['N/record', 'N/log', './fedexHelper'],
                 log.debug('FedEx Re-create Shipment', 'Loaded fulfillment: ' + tranId);
 
                 // Create the shipment (testMode = false for production)
-                var result = fedexHelper.createShipment(fulfillmentRecord, false);
+                var result = fedexHelper.createShipment(fulfillmentRecord, false, { skipDownload: skipDownload });
 
                 if (result.success) {
                     response.success = true;
                     response.message = 'FedEx shipment created successfully';
                     response.trackingNumber = result.trackingNumber || '';
-                    log.audit('FedEx Re-create Shipment', 'SUCCESS - Tracking: ' + response.trackingNumber);
+                    response.packageCount = result.packageCount || 0;
+                    response.skipDownload = result.skipDownload || false;
+                    log.audit('FedEx Re-create Shipment', 'SUCCESS - Tracking: ' + response.trackingNumber + ', Packages: ' + response.packageCount + ', SkipDownload: ' + response.skipDownload);
                 } else {
                     response.message = result.message || result.error || 'Unknown error creating FedEx shipment';
                     log.error('FedEx Re-create Shipment', 'FAILED - ' + response.message);

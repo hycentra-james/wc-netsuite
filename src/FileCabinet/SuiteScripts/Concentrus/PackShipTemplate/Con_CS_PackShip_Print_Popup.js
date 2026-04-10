@@ -434,6 +434,49 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
      * Calls a server-side Suitelet because fedexHelper requires server-only modules (N/log, N/file)
      * Used when initial download failed but shipment was created successfully
      */
+    /**
+     * Download FedEx labels in batches via the retry Suitelet.
+     * Each Suitelet call gets fresh governance units (1,000), processing ~10 labels per batch.
+     * Returns total downloaded count or throws on error.
+     */
+    function batchDownloadLabels(ifId) {
+        const retrySuiteletUrl = url.resolveScript({
+            scriptId: 'customscript_hyc_fedex_retry_label',
+            deploymentId: 'customdeploy_hyc_fedex_retry_label',
+            params: { ifid: ifId }
+        });
+
+        var totalDownloaded = 0;
+        var batchNumber = 0;
+        var maxBatches = 20; // Safety limit to prevent infinite loops
+
+        while (batchNumber < maxBatches) {
+            batchNumber++;
+            console.log('Label download batch ' + batchNumber + '...');
+
+            var retryResponse = https.get({ url: retrySuiteletUrl });
+
+            if (retryResponse.code !== 200) {
+                throw new Error('Retry Suitelet returned HTTP ' + retryResponse.code);
+            }
+
+            var retryResult = JSON.parse(retryResponse.body);
+            console.log('Batch ' + batchNumber + ' result:', JSON.stringify(retryResult));
+
+            totalDownloaded += (retryResult.downloadedCount || 0);
+
+            if (retryResult.remainingCount > 0) {
+                // More labels to download — loop again
+                continue;
+            } else {
+                // All done (or no more URLs to retry)
+                break;
+            }
+        }
+
+        return totalDownloaded;
+    }
+
     function conPsRetryLabelDownload() {
         const confirmed = confirm('This will retry downloading the FedEx label(s) that failed previously. Continue?');
         if (!confirmed) return;
@@ -442,34 +485,10 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
             const ifId = currentRecord.get().id;
             console.log('Retrying label download for Item Fulfillment:', ifId);
 
-            // Call the FedEx Retry Label Download Suitelet (server-side) since fedexHelper uses server-only modules
-            const suiteletUrl = url.resolveScript({
-                scriptId: 'customscript_hyc_fedex_retry_label',
-                deploymentId: 'customdeploy_hyc_fedex_retry_label',
-                params: { ifid: ifId }
-            });
+            var totalDownloaded = batchDownloadLabels(ifId);
 
-            console.log('Calling FedEx Retry Label Suitelet:', suiteletUrl);
-
-            const response = https.get({
-                url: suiteletUrl
-            });
-
-            console.log('Suitelet response:', response.body);
-
-            if (response.code === 200) {
-                const result = JSON.parse(response.body);
-
-                if (result.success) {
-                    alert('Label download successful!\n\n' + result.message);
-                    location.reload(); // Refresh to update button visibility
-                } else {
-                    alert('Label download completed with issues:\n\n' + result.message);
-                    location.reload();
-                }
-            } else {
-                alert('Label download failed:\n\nHTTP Error ' + response.code);
-            }
+            alert('Label download complete!\n\nDownloaded ' + totalDownloaded + ' label(s).');
+            location.reload();
         } catch (e) {
             console.error('Retry label download error:', e);
             alert('Error retrying label download: ' + e.message);
@@ -511,17 +530,33 @@ define(['N/currentRecord', 'N/record', 'N/https', 'N/url', 'N/runtime', 'N/searc
 
             console.log('Suitelet response:', response.body);
 
-            if (response.code === 200) {
-                const result = JSON.parse(response.body);
-
-                if (result.success) {
-                    alert('FedEx Shipment created successfully!\n\nTracking Number: ' + (result.trackingNumber || 'See record'));
-                    location.reload();
-                } else {
-                    alert('FedEx Shipment creation failed:\n\n' + (result.message || 'Unknown error'));
-                }
-            } else {
+            if (response.code !== 200) {
                 alert('FedEx Shipment creation failed:\n\nHTTP Error ' + response.code);
+                return;
+            }
+
+            const result = JSON.parse(response.body);
+
+            if (!result.success) {
+                alert('FedEx Shipment creation failed:\n\n' + (result.message || 'Unknown error'));
+                return;
+            }
+
+            // Shipment created — check if labels need batched downloading
+            if (result.skipDownload && result.packageCount > 0) {
+                console.log('Shipment created with ' + result.packageCount + ' packages, downloading labels in batches...');
+
+                var totalDownloaded = batchDownloadLabels(ifId);
+
+                alert('FedEx Shipment created successfully!\n\n' +
+                    'Tracking Number: ' + (result.trackingNumber || 'See record') + '\n' +
+                    'Packages: ' + result.packageCount + '\n' +
+                    'Labels downloaded: ' + totalDownloaded);
+                location.reload();
+            } else {
+                // Small shipment — labels already downloaded inline
+                alert('FedEx Shipment created successfully!\n\nTracking Number: ' + (result.trackingNumber || 'See record'));
+                location.reload();
             }
         } catch (e) {
             console.error('Re-create FedEx shipment error:', e);
