@@ -112,29 +112,28 @@ define(['N/search', 'N/task', 'N/runtime', 'N/log'], (search, task, runtime, log
 
             log.audit('Kits Found', `Found ${kits.length} Kits containing Item ${itemId}`);
 
-            // Option 1: Trigger the existing Scheduled Script (safer for bulk)
-            // This reuses the existing sync logic
+            // Trigger the Map/Reduce script (handles governance via reduce stage)
             try {
-                const scriptTask = task.create({
-                    taskType: task.TaskType.SCHEDULED_SCRIPT,
-                    scriptId: 'customscript_hyc_item_fields_sync_ss',
-                    deploymentId: 'customdeploy_hyc_item_fields_sync_ss_dpl',
+                const mrTask = task.create({
+                    taskType: task.TaskType.MAP_REDUCE,
+                    scriptId: 'customscript_hyc_item_fields_sync_mr',
+                    deploymentId: 'customdeploy_hyc_item_fields_sync_mr',
                     params: {
-                        custscript_item_id: itemId
+                        custscript_mr_item_ids: String(itemId)
                     }
                 });
 
-                const taskId = scriptTask.submit();
-                log.audit('Sync Triggered', `Task ID: ${taskId}, Item ID: ${itemId}`);
+                const taskId = mrTask.submit();
+                log.audit('Sync Triggered', `MR Task ID: ${taskId}, Item ID: ${itemId}`);
 
             } catch (taskError) {
-                // If scheduled script fails (e.g., already queued), just log and skip
-                // DO NOT fall back to inline sync - it exceeds governance limits during bulk operations
-                log.audit('Scheduled Script Not Queued', {
+                // If MR task fails (e.g., all deployments busy), log and skip.
+                // Item will be picked up by the scheduled MR safety-net run.
+                log.audit('MR Task Not Queued', {
                     itemId: itemId,
                     kitCount: kits.length,
                     reason: taskError.message,
-                    note: 'Sync will be handled when scheduled script runs'
+                    note: 'Sync will be handled by scheduled MR safety-net run'
                 });
             }
 
