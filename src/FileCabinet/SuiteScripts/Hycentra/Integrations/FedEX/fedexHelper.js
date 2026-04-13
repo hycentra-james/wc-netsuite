@@ -2535,20 +2535,15 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
          * @param {boolean} testMode Whether to run in test mode (no record updates)
          * @returns {Object} Shipment creation result
          */
-        function createShipment(fulfillmentRecord, testMode, options) {
+        function createShipment(fulfillmentRecord, testMode) {
             // Start execution timer for performance profiling
             var startTime = Date.now();
             log.debug('PERFORMANCE', 'createShipment()::Execution started at ' + new Date(startTime).toISOString());
-
-            var skipDownload = (options && options.skipDownload) || false;
-
+            
             try {
                 // Set the module-level test mode flag
                 IS_TEST_MODE = testMode || false;
                 log.debug('DEBUG', 'createShipment()::Set IS_TEST_MODE = ' + IS_TEST_MODE);
-                if (skipDownload) {
-                    log.audit('DEBUG', 'createShipment()::skipDownload mode - labels will NOT be downloaded');
-                }
                 
                 // Build shipment payload
                 var payload = buildShipmentPayload(fulfillmentRecord);
@@ -2715,23 +2710,6 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                             trackingNumber = firstShipment.masterTrackingNumber;
                         }
 
-                        // Log each label URL upfront before downloading (governance safety net)
-                        var packageCount = 0;
-                        if (firstShipment.pieceResponses && firstShipment.pieceResponses.length > 0) {
-                            packageCount = firstShipment.pieceResponses.length;
-                            for (var p = 0; p < packageCount; p++) {
-                                var pr = firstShipment.pieceResponses[p];
-                                var labelUrl = (pr.packageDocuments && pr.packageDocuments.length > 0 && pr.packageDocuments[0].url) || 'N/A';
-                                log.audit('FedEx Label URL', 'Pkg ' + (p + 1) + '/' + packageCount + ': ' + pr.trackingNumber + ' | ' + labelUrl);
-                            }
-                        }
-
-                        // Auto-skip label downloads for high package count to avoid governance limit
-                        if (packageCount >= 10 && !skipDownload) {
-                            skipDownload = true;
-                            log.audit('Auto Skip Download', 'Package count (' + packageCount + ') >= 10, skipping inline label downloads to stay within governance limits');
-                        }
-
                         // Extract label URLs from all piece responses
                         if (firstShipment.pieceResponses && firstShipment.pieceResponses.length > 0) {
                             for (var i = 0; i < firstShipment.pieceResponses.length; i++) {
@@ -2740,14 +2718,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                                     for (var j = 0; j < pieceResponse.packageDocuments.length; j++) {
                                         var packageDoc = pieceResponse.packageDocuments[j];
                                         if (packageDoc.url && packageDoc.contentType === 'LABEL') {
-                                            if (skipDownload) {
-                                                // Skip download - just collect the original FedEx URL
-                                                labelUrls.push(packageDoc.url);
-                                            } else {
-                                                // Download and save the label, fallback to original URL if download fails
-                                                var savedLabelUrl = downloadAndSaveLabel(packageDoc.url, bearerToken, salesOrderNumber, i+1);
-                                                labelUrls.push(savedLabelUrl);
-                                            }
+                                            // Download and save the label, fallback to original URL if download fails
+                                            var savedLabelUrl = downloadAndSaveLabel(packageDoc.url, bearerToken, salesOrderNumber, i+1);
+                                            labelUrls.push(savedLabelUrl);
                                         }
                                     }
                                 }
@@ -2855,9 +2828,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     labelUrl: labelUrlString,
                     transactionId: transactionId,
                     alerts: alertsJson,
-                    executionTime: executionTime,
-                    packageCount: packageCount,
-                    skipDownload: skipDownload
+                    executionTime: executionTime
                 };
 
             } catch (e) {
@@ -3030,29 +3001,24 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                 // Get fresh bearer token
                 var tokenRecord = getTokenRecord();
-                var bearerToken = tokenRecord ? tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' }) : '';
-                if (!bearerToken) {
+                if (!tokenRecord || !tokenRecord.bearerToken) {
                     return {
                         success: false,
                         message: 'Could not obtain FedEx bearer token'
                     };
                 }
+                var bearerToken = tokenRecord.bearerToken;
 
-                // Split URLs and download in batches to stay within governance limits
-                var allUrls = originalLabelUrls.split('|||').filter(function(u) { return u.trim(); });
-                var BATCH_SIZE = 10;
-                var urlsToProcess = allUrls.slice(0, BATCH_SIZE);
-                var deferredUrls = allUrls.slice(BATCH_SIZE);
+                // Split URLs and download each
+                var urls = originalLabelUrls.split('|||');
                 var downloadedUrls = [];
                 var failedUrls = [];
 
-                log.debug('Retry Label Download', 'Total URLs: ' + allUrls.length + ', Processing: ' + urlsToProcess.length + ', Deferred: ' + deferredUrls.length);
-
-                for (var i = 0; i < urlsToProcess.length; i++) {
-                    var originalUrl = urlsToProcess[i].trim();
+                for (var i = 0; i < urls.length; i++) {
+                    var originalUrl = urls[i].trim();
                     if (!originalUrl) continue;
 
-                    log.debug('Retry Label Download', 'Attempting download ' + (i + 1) + ' of ' + urlsToProcess.length + ': ' + originalUrl);
+                    log.debug('Retry Label Download', 'Attempting download ' + (i + 1) + ' of ' + urls.length + ': ' + originalUrl);
 
                     var savedUrl = downloadAndSaveLabel(originalUrl, bearerToken, salesOrderNumber, i + 1);
 
@@ -3086,10 +3052,9 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     custbody_shipping_label_url: newLabelUrlString
                 };
 
-                // Combine deferred URLs (not yet attempted) with failed downloads
-                var remainingUrls = deferredUrls.concat(failedUrls);
-                if (remainingUrls.length > 0) {
-                    updateValues.custbody_original_label_url = remainingUrls.join('|||');
+                // Clear or update original URL field based on remaining failures
+                if (failedUrls.length > 0) {
+                    updateValues.custbody_original_label_url = failedUrls.join('|||');
                 } else {
                     updateValues.custbody_original_label_url = '';
                 }
@@ -3105,20 +3070,18 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     printFedExLabels(downloadedUrls.join('|||'));
                 }
 
-                var resultMessage = 'Downloaded ' + downloadedUrls.length + ' of ' + allUrls.length + ' labels';
-                if (remainingUrls.length > 0) {
-                    resultMessage += '. ' + remainingUrls.length + ' label(s) remaining (' + deferredUrls.length + ' deferred, ' + failedUrls.length + ' failed).';
+                var resultMessage = 'Downloaded ' + downloadedUrls.length + ' of ' + urls.length + ' labels';
+                if (failedUrls.length > 0) {
+                    resultMessage += '. ' + failedUrls.length + ' label(s) still failed - original URLs preserved for retry.';
                 }
 
                 log.audit('Retry Label Download', resultMessage);
 
                 return {
-                    success: remainingUrls.length === 0,
+                    success: failedUrls.length === 0,
                     message: resultMessage,
                     downloadedCount: downloadedUrls.length,
-                    failedCount: failedUrls.length,
-                    remainingCount: remainingUrls.length,
-                    totalCount: allUrls.length
+                    failedCount: failedUrls.length
                 };
 
             } catch (e) {

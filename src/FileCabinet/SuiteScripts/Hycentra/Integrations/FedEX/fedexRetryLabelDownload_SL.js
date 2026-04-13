@@ -34,17 +34,13 @@ define(['N/log', './fedexHelper'],
                 // Call the fedexHelper retry function
                 var result = fedexHelper.retryLabelDownload(fulfillmentId);
 
-                response.success = result.success;
-                response.message = result.message || (result.success ? 'Label download successful' : 'Unknown error retrying label download');
-                response.downloadedCount = result.downloadedCount || 0;
-                response.failedCount = result.failedCount || 0;
-                response.remainingCount = result.remainingCount || 0;
-                response.totalCount = result.totalCount || 0;
-
                 if (result.success) {
+                    response.success = true;
+                    response.message = result.message || 'Label download successful';
                     log.audit('FedEx Retry Label Download', 'SUCCESS - ' + response.message);
                 } else {
-                    log.error('FedEx Retry Label Download', 'PARTIAL/FAILED - ' + response.message);
+                    response.message = result.message || 'Unknown error retrying label download';
+                    log.error('FedEx Retry Label Download', 'FAILED - ' + response.message);
                 }
 
             } catch (e) {

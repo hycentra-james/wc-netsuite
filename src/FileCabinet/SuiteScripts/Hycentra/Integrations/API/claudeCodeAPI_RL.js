@@ -441,29 +441,6 @@ define(['N/query', 'N/search', 'N/record', 'N/log', 'N/error', 'N/runtime'],
             });
         }
 
-        // Update sublist lines: { sublistId: "package", lines: [{ line: 0, values: { fieldId: value } }] }
-        if (params.sublists && Array.isArray(params.sublists)) {
-            params.sublists.forEach((sublistUpdate) => {
-                const sublistId = sublistUpdate.sublistId;
-                if (sublistUpdate.lines && Array.isArray(sublistUpdate.lines)) {
-                    sublistUpdate.lines.forEach((lineUpdate) => {
-                        Object.keys(lineUpdate.values).forEach((fieldId) => {
-                            try {
-                                rec.setSublistValue({
-                                    sublistId: sublistId,
-                                    fieldId: fieldId,
-                                    line: lineUpdate.line,
-                                    value: lineUpdate.values[fieldId]
-                                });
-                            } catch (e) {
-                                log.debug({ title: 'Sublist Update Error', details: `${sublistId}[${lineUpdate.line}].${fieldId}: ${e.message}` });
-                            }
-                        });
-                    });
-                }
-            });
-        }
-
         const savedId = rec.save({
             enableSourcing: params.enableSourcing !== false,
             ignoreMandatoryFields: params.ignoreMandatoryFields || false
