@@ -4,22 +4,21 @@
  *
  * WC-563: Kit Field Sync - Map/Reduce Implementation
  * ---------------------------------------------------
- * Syncs inventory item fields and related parts to parent kit items.
+ * Replaces the per-item Scheduled Script approach to fix queue collision
+ * during bulk CSV imports. Previously, the UE submitted one SS task per item,
+ * but only the first succeeded because subsequent task.submit() calls failed
+ * silently when the same SS deployment was already queued/running.
  *
- * Triggered three ways:
- *   1. UE afterSubmit (ItemFieldsSync_UE) - item save/CSV import
- *   2. UE afterSubmit (RelatedPartsSync_UE) - related parts record change
- *   3. Manual trigger - set custscript_mr_item_ids param on deployment
- *   4. Scheduled safety net - searches recently modified items if no param set
+ * This MR script can be triggered two ways:
+ *   1. Explicitly via UE afterSubmit - receives comma-separated item IDs in custscript_mr_item_ids
+ *   2. On a schedule (e.g. every 15 min) - searches for recently modified items as a safety net
  *
- * Architecture:
- *   map()     - Field sync: load item, find parent kits, update shared fields, save kit (cheap)
- *   reduce()  - Related parts sync: delete + recreate related parts per kit (expensive, own budget)
- *   summarize() - Audit trail
+ * The map stage processes each item independently (parallel-safe), performing:
+ *   - Field sync from inventory item to parent kit(s)
+ *   - Related custom record sync (Cabinet Wood Material, etc.)
+ *   - Related Parts aggregation sync
  *
- * The reduce stage gets 5,000 governance units per kit, solving the
- * SSS_USAGE_LIMIT_EXCEEDED error that occurred when related parts sync
- * ran inside map (which only gets 1,000 units).
+ * All sync logic is ported from ItemFieldsSync_SS.js to keep behavior identical.
  */
 define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search, runtime, log) {
 
@@ -153,16 +152,19 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
                     kitRecord.save();
                     log.debug('Map - Kit Saved', 'Kit ID: ' + kitId);
 
-                    // Emit kitId to reduce stage for related parts sync
-                    // Each reduce invocation gets its own 5,000 unit governance budget
-                    context.write({
-                        key: String(kitId),
-                        value: JSON.stringify({ itemId: itemId })
-                    });
+                    // 4. Sync Related Parts (aggregate from ALL member items)
+                    //    Done AFTER kit save to avoid record conflicts
+                    syncRelatedPartsToKit(kitId, kitRecord);
 
                 } catch (kitError) {
                     log.error('Map - Kit Processing Error', 'Item ID: ' + itemId + ', Kit ID: ' + kitId + ', Error: ' + kitError.message);
                 }
+            });
+
+            // Write to reduce for summary tracking
+            context.write({
+                key: itemId,
+                value: { kitCount: kitIds.length, fieldMappings: fieldsToUpdate ? fieldsToUpdate.length : 0 }
             });
 
             log.audit('Map - Item Complete', 'Item ID: ' + itemId + ' synced to ' + kitIds.length + ' kits');
@@ -173,49 +175,33 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
     }
 
     /**
-     * Reduce Stage: Sync related parts for each kit.
-     * Each reduce invocation gets its own 5,000 unit governance budget,
-     * which is sufficient for deleting + recreating related parts records.
-     * If the same kitId appears from multiple item saves (CSV batch),
-     * MR deduplicates by key - the kit only gets synced once.
-     */
-    function reduce(context) {
-        var kitId = context.key;
-        try {
-            log.audit('Reduce - Syncing Related Parts', 'Kit ID: ' + kitId);
-            syncRelatedPartsToKit(kitId, null);
-            context.write({ key: kitId, value: 'success' });
-        } catch (e) {
-            log.error('Reduce - Error', 'Kit ID: ' + kitId + ', Error: ' + e.message);
-        }
-    }
-
-    /**
      * Summarize: Log overall results for audit trail.
      */
     function summarize(summary) {
+        var totalItems = 0;
         var totalKits = 0;
         var errors = [];
 
         summary.output.iterator().each(function (key, value) {
-            totalKits++;
+            totalItems++;
+            try {
+                var data = JSON.parse(value);
+                totalKits += data.kitCount || 0;
+            } catch (e) {
+                // ignore parse errors
+            }
             return true;
         });
 
         // Collect map stage errors
         summary.mapSummary.errors.iterator().each(function (key, error) {
-            errors.push('Map Item ' + key + ': ' + error);
-            return true;
-        });
-
-        // Collect reduce stage errors
-        summary.reduceSummary.errors.iterator().each(function (key, error) {
-            errors.push('Reduce Kit ' + key + ': ' + error);
+            errors.push('Item ' + key + ': ' + error);
             return true;
         });
 
         log.audit('Summarize - Complete',
-            'Kits Synced: ' + totalKits +
+            'Items Processed: ' + totalItems +
+            ', Kits Updated: ' + totalKits +
             ', Errors: ' + errors.length +
             ', Duration: ' + summary.seconds + 's' +
             ', Usage: ' + summary.usage
@@ -457,7 +443,6 @@ define(['N/record', 'N/search', 'N/runtime', 'N/log'], function (record, search,
     return {
         getInputData: getInputData,
         map: map,
-        reduce: reduce,
         summarize: summarize
     };
 });
