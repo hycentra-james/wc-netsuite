@@ -1008,9 +1008,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     "AND",
                     ["item", "anyof", memberIds],
                     "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"],
-                    "AND",
-                    ["location", "anyof", "1"] // WC-549: only Water Creation physical location (ID 1)
+                    ["expecteddeliverydate", "onorafter", "daysago10"]
                 ],
                 columns: [
                     search.createColumn({ name: "item", summary: "GROUP" }),
@@ -1105,9 +1103,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     "AND",
                     ["item", "anyof", memberIds],
                     "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"],
-                    "AND",
-                    ["location", "anyof", "1"] // WC-549: only Water Creation physical location (ID 1)
+                    ["expecteddeliverydate", "onorafter", "daysago10"]
                 ],
                 columns: [
                     search.createColumn({ name: "item", summary: "GROUP" }),
@@ -1230,9 +1226,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     "AND",
                     ["item", "anyof", myItems],
                     "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"], // Optimized filter
-                    "AND",
-                    ["location", "anyof", "1"] // WC-549: only Water Creation physical location (ID 1)
+                    ["expecteddeliverydate", "onorafter", "daysago10"] // Optimized filter
                 ],
                 columns: [
                     search.createColumn({
