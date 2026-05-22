@@ -36,17 +36,33 @@ define(['N/record', 'N/search', 'SuiteScripts/Concentrus/PackShipTemplate/Con_Li
                     type: record.Type.ITEM_FULFILLMENT,
                     id: newRecord.id
                 });
-                let salesOrderId = recordToEdit.getValue({
-                    fieldId: 'createdfrom'
-                })
-                let soLookup = search.lookupFields({
-                    type: 'salesorder',
-                    id: salesOrderId,
-                    columns: ['custbody_pro_number']
-                })
-                let proNumber = soLookup.custbody_pro_number
-                log.debug('proNumber', proNumber)
-                if (proNumber == "") {
+
+                // For LTL, packagetrackingnumber IS the PRO (processFullLtl writes
+                // proNumber directly to packagetrackingnumber). Prefer the IF's own
+                // package sublist over the SO lookup.
+                let proNumber = '';
+                let pkgCount = recordToEdit.getLineCount({ sublistId: 'package' });
+                for (let i = 0; i < pkgCount; i++) {
+                    let pkgTrack = recordToEdit.getSublistValue({
+                        sublistId: 'package',
+                        fieldId: 'packagetrackingnumber',
+                        line: i
+                    });
+                    if (pkgTrack) { proNumber = pkgTrack; break; }
+                }
+
+                if (!proNumber) {
+                    let salesOrderId = recordToEdit.getValue({ fieldId: 'createdfrom' });
+                    let soLookup = search.lookupFields({
+                        type: 'salesorder',
+                        id: salesOrderId,
+                        columns: ['custbody_pro_number']
+                    });
+                    proNumber = soLookup.custbody_pro_number || '';
+                }
+
+                log.debug('proNumber', proNumber);
+                if (proNumber === '') {
                     throw new Error('PRO Number is required for LTL shipment');
                 }
             }
