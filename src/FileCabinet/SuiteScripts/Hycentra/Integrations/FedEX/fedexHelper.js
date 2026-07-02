@@ -2529,8 +2529,35 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Determine whether a FedEx API error is a SATURDAY_DELIVERY rejection that
+         * we can recover from by stripping the service and retrying.
+         *
+         * We only ever add SATURDAY_DELIVERY ourselves (optional free upgrade for One
+         * Rate/Thursday shipments), so any 400 that names SATURDAY_DELIVERY as the
+         * offending special service is safe to strip-and-retry. Match is intentionally
+         * wide to cover FedEx wording variants (holiday, destination pair, etc.):
+         *   - ORGORDEST.SPECIALSERVICES.NOTALLOWED / "not allowed" (holiday, e.g. July 4)
+         *   - "...NOT.SUPPORTED" / "not supported" (destination pair doesn't offer Saturday)
+         *   - "...INVALID"
+         *
+         * @param {string} errorMessage The FedEx API error message
+         * @returns {boolean} True if the error is a recoverable Saturday-delivery rejection
+         */
+        function isSaturdayDeliveryError(errorMessage) {
+            if (!errorMessage || errorMessage.indexOf('SATURDAY_DELIVERY') === -1) {
+                return false;
+            }
+            var m = errorMessage.toUpperCase();
+            return m.indexOf('NOTALLOWED') > -1 ||    // ORGORDEST.SPECIALSERVICES.NOTALLOWED (holiday)
+                   m.indexOf('NOT ALLOWED') > -1 ||
+                   m.indexOf('NOT.SUPPORTED') > -1 ||  // existing destination-pair case
+                   m.indexOf('NOT SUPPORTED') > -1 ||
+                   m.indexOf('INVALID') > -1;
+        }
+
+        /**
          * Create FedEx shipment
-         * 
+         *
          * @param {record} fulfillmentRecord The Item Fulfillment record
          * @param {boolean} testMode Whether to run in test mode (no record updates)
          * @returns {Object} Shipment creation result
@@ -2632,18 +2659,17 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 try {
                     response = postToApi(bearerToken, apiUrl, JSON.stringify(payload));
                 } catch (apiError) {
-                    // Check if error is due to SATURDAY_DELIVERY not supported at destination
+                    // Check if error is a recoverable SATURDAY_DELIVERY rejection
+                    // (destination pair doesn't offer Saturday, or the target Saturday is a
+                    // holiday such as July 4). Covers both wordings: "not supported" and "not allowed".
                     var errorMessage = apiError.message || '';
-                    var isSaturdayDeliveryError = false;
+                    var saturdayDeliveryError = isSaturdayDeliveryError(errorMessage);
 
-                    // Parse error to check for Saturday Delivery issue
-                    if (errorMessage.indexOf('SATURDAY_DELIVERY') > -1 &&
-                        (errorMessage.indexOf('NOT.SUPPORTED') > -1 || errorMessage.indexOf('not supported') > -1)) {
-                        isSaturdayDeliveryError = true;
-                        log.audit('Saturday Delivery Retry', 'SATURDAY_DELIVERY not supported at destination - retrying without it');
+                    if (saturdayDeliveryError) {
+                        log.audit('Saturday Delivery Retry', 'FedEx rejected SATURDAY_DELIVERY - retrying without it. FedEx error: ' + errorMessage);
                     }
 
-                    if (isSaturdayDeliveryError && payload.requestedShipment.shipmentSpecialServices) {
+                    if (saturdayDeliveryError && payload.requestedShipment.shipmentSpecialServices) {
                         // Remove SATURDAY_DELIVERY from special services and retry
                         var specialServices = payload.requestedShipment.shipmentSpecialServices.specialServiceTypes || [];
                         var filteredServices = [];
@@ -3000,14 +3026,16 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 }
 
                 // Get fresh bearer token
+                // getTokenRecord() already calls validateToken() which will refresh if needed
                 var tokenRecord = getTokenRecord();
-                if (!tokenRecord || !tokenRecord.bearerToken) {
+                var bearerToken = tokenRecord ? tokenRecord.getValue({ fieldId: 'custrecord_hyc_fedex_access_token' }) || '' : '';
+
+                if (!bearerToken) {
                     return {
                         success: false,
                         message: 'Could not obtain FedEx bearer token'
                     };
                 }
-                var bearerToken = tokenRecord.bearerToken;
 
                 // Split URLs and download each
                 var urls = originalLabelUrls.split('|||');
