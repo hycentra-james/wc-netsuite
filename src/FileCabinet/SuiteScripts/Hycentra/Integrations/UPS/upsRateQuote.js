@@ -20,12 +20,16 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './upsHelper', '../FedEX/shi
 
                 log.debug('UPS Rate Quote', 'Getting rate quote for Sales Order: ' + salesOrderRecord.id + ', Ship Method: ' + shipMethodId);
 
-                // Get UPS service code from mapping
-                var upsServiceCode = upsHelper.getUPSServiceCode(shipMethodId);
-                log.debug('UPS Rate Quote', 'Using service code: ' + upsServiceCode);
+                // Get UPS service code AND packaging type from mapping
+                // (customrecord_hyc_shipmethod_code_map) - resolved together so the rate
+                // quote's PackagingType stays consistent with the shipment label payload.
+                var shipMethodMapping = upsHelper.getShipMethodMappingById(shipMethodId);
+                var upsServiceCode = shipMethodMapping.serviceCode;
+                var upsPackagingCode = shipMethodMapping.packagingType || '02'; // fallback: Customer Supplied Package
+                log.debug('UPS Rate Quote', 'Using service code: ' + upsServiceCode + ', packaging code: ' + upsPackagingCode);
 
                 // Build rate quote payload
-                var payload = buildRateQuotePayload(salesOrderRecord, upsServiceCode);
+                var payload = buildRateQuotePayload(salesOrderRecord, upsServiceCode, upsPackagingCode);
 
                 // Get authentication token and API URL
                 var tokenRecord = upsHelper.getTokenRecord();
@@ -83,9 +87,10 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './upsHelper', '../FedEX/shi
          *
          * @param {record} salesOrderRecord The Sales Order record
          * @param {string} upsServiceCode The UPS service code (e.g., '03' for Ground)
+         * @param {string} upsPackagingCode The UPS packaging type code (e.g., '02'); defaults to '02'
          * @returns {Object} Rate quote request payload
          */
-        function buildRateQuotePayload(salesOrderRecord, upsServiceCode) {
+        function buildRateQuotePayload(salesOrderRecord, upsServiceCode, upsPackagingCode) {
             try {
                 log.debug('Rate Quote Payload', 'Building payload for Sales Order: ' + salesOrderRecord.id);
 
@@ -110,14 +115,18 @@ define(['N/record', 'N/search', 'N/log', 'N/error', './upsHelper', '../FedEX/shi
                 // Build shipper info
                 var shipperInfo = upsHelper.buildShipperInfo(null, mappingRecord);
 
+                // Resolve packaging code/description once (config-driven, default '02')
+                var resolvedPackagingCode = upsPackagingCode || '02';
+                var resolvedPackagingDescription = upsHelper.getUPSPackagingDescription(resolvedPackagingCode);
+
                 // Build package line items
                 var packageLineItems = [];
                 for (var i = 0; i < weightDimensionData.packages.length; i++) {
                     var pkg = weightDimensionData.packages[i];
                     var packageItem = {
                         PackagingType: {
-                            Code: '02', // Customer Supplied Package
-                            Description: 'Customer Supplied Package'
+                            Code: resolvedPackagingCode,
+                            Description: resolvedPackagingDescription
                         },
                         PackageWeight: {
                             UnitOfMeasurement: {

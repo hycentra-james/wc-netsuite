@@ -733,6 +733,32 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
         }
 
         /**
+         * Get the UPS Packaging.Description for a given UPS packaging type code.
+         * Falls back to a safe generic description for unknown codes so we never
+         * label a non-'02' code as 'Customer Supplied Package'.
+         *
+         * @param {string} packagingCode The UPS packaging type code (e.g., '02')
+         * @returns {string} Human-readable UPS packaging description
+         */
+        function getUPSPackagingDescription(packagingCode) {
+            var packagingMap = {
+                '00': 'Unknown',
+                '01': 'UPS Letter',
+                '02': 'Customer Supplied Package',
+                '03': 'Tube',
+                '04': 'PAK',
+                '21': 'UPS Express Box',
+                '24': 'UPS 25KG Box',
+                '25': 'UPS 10KG Box',
+                '30': 'Pallet',
+                '2a': 'Small Express Box',
+                '2b': 'Medium Express Box',
+                '2c': 'Large Express Box'
+            };
+            return packagingMap[packagingCode] || 'Package';
+        }
+
+        /**
          * Get ship method mapping by ID
          *
          * @param {string|number} shipMethodId The shipping method internal ID
@@ -1795,9 +1821,16 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var shipperInfo = buildShipperInfo(fulfillmentRecord, mappingRecord);
                 var recipientInfo = buildRecipientInfo(fulfillmentRecord);
 
-                // Get service code
+                // Get service code and packaging type from the ship-method mapping
+                // (customrecord_hyc_shipmethod_code_map). Resolved once here and threaded
+                // into every package's Packaging.Code below so packaging is config-driven.
                 var shipMethodId = fulfillmentRecord.getValue({ fieldId: 'shipmethod' });
-                var serviceCode = getUPSServiceCode(shipMethodId);
+                var shipMethodMapping = getShipMethodMappingById(shipMethodId);
+                var serviceCode = shipMethodMapping.serviceCode;
+                var packagingCode = shipMethodMapping.packagingType || '02'; // fallback: Customer Supplied Package
+                var packagingDescription = getUPSPackagingDescription(packagingCode);
+                log.debug('buildShipmentPayload', 'Resolved from mapping - serviceCode: ' + serviceCode +
+                    ', packagingCode: ' + packagingCode + ' (' + packagingDescription + ')');
 
                 log.debug('buildShipmentPayload', 'wcAccountNumber: ' + wcAccountNumber +
                     ', isBillToThirdParty: ' + isBillToThirdParty +
@@ -1845,8 +1878,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         var packageObj = {
                             Description: 'Package ' + (c + 1) + ' - ' + cartonId,
                             Packaging: {
-                                Code: '02',
-                                Description: 'Customer Supplied Package'
+                                Code: packagingCode,
+                                Description: packagingDescription
                             },
                             Dimensions: {
                                 UnitOfMeasurement: {
@@ -1890,8 +1923,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         var fallbackPackageObj = {
                             Description: 'Package ' + (i + 1),
                             Packaging: {
-                                Code: '02',
-                                Description: 'Customer Supplied Package'
+                                Code: packagingCode,
+                                Description: packagingDescription
                             },
                             Dimensions: {
                                 UnitOfMeasurement: {
@@ -1925,8 +1958,8 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                     var defaultPackageObj = {
                         Description: 'Package 1',
                         Packaging: {
-                            Code: '02',
-                            Description: 'Customer Supplied Package'
+                            Code: packagingCode,
+                            Description: packagingDescription
                         },
                         Dimensions: {
                             UnitOfMeasurement: {
@@ -2586,6 +2619,7 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
             getCurrentDateString: getCurrentDateString,
             getCurrentDateForFilename: getCurrentDateForFilename,
             getUPSServiceCode: getUPSServiceCode,
+            getUPSPackagingDescription: getUPSPackagingDescription,
             getShipMethodMappingById: getShipMethodMappingById,
             getShipMethodMapping: getShipMethodMapping,
             buildShipperInfo: buildShipperInfo,
