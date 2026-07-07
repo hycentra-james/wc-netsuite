@@ -688,7 +688,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     var currentKitValues = search.lookupFields({
                         type: search.Type.KIT_ITEM,
                         id: mapKeyData,
-                        columns: ['itemid', 'custitem_fmt_next_receipt_date', 'custitem_fmt_avail_kit_quantity']
+                        columns: ['itemid', 'custitem_fmt_next_receipt_date', 'custitem_fmt_next_receipt_quantity', 'custitem_fmt_avail_kit_quantity']
                     });
 
                     var dateToSet;
@@ -699,16 +699,28 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     }
                     var newAvailableQty = mapValueData.availableQuantity;
 
+                    // WC-549: the kit's next-receipt QUANTITY was computed in map()
+                    // (processKitInventoryAndReceipts -> quantityOnOrder) but was never included
+                    // in the values submitted below - only the date and available-quantity were
+                    // written. Wire it up here, falling back to 20 (mirrors the item-level
+                    // default-to-20 fallback used for InvtPart items above) when there's no
+                    // PO/inbound-shipment/member data to compute from.
+                    var newNextReceiptQty = (mapValueData.quantityOnOrder !== null && mapValueData.quantityOnOrder !== undefined)
+                        ? mapValueData.quantityOnOrder
+                        : 20;
+
                     log.debug('Updating Kit Item', {
                         itemId: mapKeyData,
                         itemName: currentKitValues.itemid,
                         type: 'Kit',
                         original: {
                             receiptDate: currentKitValues.custitem_fmt_next_receipt_date,
+                            receiptQuantity: currentKitValues.custitem_fmt_next_receipt_quantity,
                             availableQuantity: currentKitValues.custitem_fmt_avail_kit_quantity
                         },
                         updated: {
                             receiptDate: dateToSet.toLocaleDateString(),
+                            receiptQuantity: newNextReceiptQty,
                             availableQuantity: newAvailableQty
                         }
                     });
@@ -718,6 +730,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                         id: mapKeyData,
                         values: {
                             'custitem_fmt_next_receipt_date': dateToSet,
+                            'custitem_fmt_next_receipt_quantity': newNextReceiptQty,
                             'custitem_fmt_avail_kit_quantity': newAvailableQty
                         }
                     })
@@ -804,27 +817,54 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
 
                 result.allMemberItemsInStock = allInStock;
 
-                if (allInStock) {
-                    // Case 1: All member items are in stock
-                    log.debug('All kit members in stock', kitId);
-                    result.nextReceiptDate = new Date(moment().format('M/D/YYYY')); // Today
-                    
-                    // Calculate next receipt quantity from inbound shipments and POs
-                    result.nextReceiptQuantity = calculateKitReceiptQuantity(kitMembers);
-                    
-                } else {
-                    // Case 2: Some member items are out of stock
+                if (!allInStock) {
+                    // Kit is not currently fillable if any member is short
                     log.debug('Some kit members out of stock', {
                         'kitId': kitId,
                         'outOfStockMembers': outOfStockMembers
                     });
-                    
+
                     result.availableQuantity = 0; // Kit not available if any member is out of stock
-                    
-                    // Find earliest date when all out-of-stock items will be available
-                    var earliestCompleteDate = findEarliestKitCompletionDate(outOfStockMembers);
+                }
+
+                // WC-549: Next-receipt date/quantity derivation.
+                //
+                // Kits whose item ID ends in "-000000000" have exactly ONE inventory-item
+                // component 100% of the time (naming convention). Detected generally here as
+                // "kit has exactly one member" rather than string-matching the SKU suffix, since
+                // that's more robust and self-documenting. For those kits, the member's own
+                // custitem_fmt_next_receipt_date / custitem_fmt_next_receipt_quantity fields are
+                // already correctly maintained by the item-level path (findMyReceipts, above), so
+                // we copy them directly instead of re-deriving PO/inbound-shipment logic a second
+                // time with different branching. This guarantees kit/item parity by construction.
+                //
+                // Kits with more than one member (rare/none today per business) always go through
+                // the real PO/inbound-shipment lookup - there is no more "all members currently in
+                // stock -> stamp today" shortcut. Current on-hand stock status doesn't tell us when
+                // the kit's NEXT receipt is actually coming.
+                if (kitMembers.length === 1) {
+                    var singleMemberReceipt = getSingleMemberReceiptFields(kitMembers[0].memberId);
+                    result.nextReceiptDate = singleMemberReceipt.nextReceiptDate;
+                    result.nextReceiptQuantity = singleMemberReceipt.nextReceiptQuantity;
+
+                    log.debug('Single-member kit: copied receipt fields from child item', {
+                        'kitId': kitId,
+                        'memberId': kitMembers[0].memberId,
+                        'memberItemId': kitMembers[0].memberItemId,
+                        'nextReceiptDate': result.nextReceiptDate,
+                        'nextReceiptQuantity': result.nextReceiptQuantity
+                    });
+                } else {
+                    var earliestCompleteDate = findEarliestKitCompletionDate(kitMembers);
                     result.nextReceiptDate = earliestCompleteDate.date;
-                    result.nextReceiptQuantity = earliestCompleteDate.quantity;
+                    result.nextReceiptQuantity = calculateKitReceiptQuantity(kitMembers);
+
+                    log.debug('Multi-member kit: derived receipt fields from real PO/inbound-shipment lookup', {
+                        'kitId': kitId,
+                        'memberCount': kitMembers.length,
+                        'nextReceiptDate': result.nextReceiptDate,
+                        'nextReceiptQuantity': result.nextReceiptQuantity
+                    });
                 }
 
                 return result;
@@ -875,6 +915,42 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             });
 
             return members;
+        }
+
+        /**
+         * WC-549: For single-member kits (e.g. "-000000000" SKUs, which have exactly one
+         * inventory-item component by naming convention), the kit's next-receipt date/quantity
+         * can just be copied from the member item's own custitem_fmt_next_receipt_date /
+         * custitem_fmt_next_receipt_quantity fields - those are already correctly maintained by
+         * the item-level path (findMyReceipts / map()'s InvtPart branch) earlier in this same
+         * script run. This is a direct field read, not a recompute, so it's safe to call here.
+         */
+        function getSingleMemberReceiptFields(memberId) {
+            var receiptFields = {
+                nextReceiptDate: null,
+                nextReceiptQuantity: null
+            };
+
+            var memberValues = search.lookupFields({
+                type: search.Type.INVENTORY_ITEM,
+                id: memberId,
+                columns: ['custitem_fmt_next_receipt_date', 'custitem_fmt_next_receipt_quantity']
+            });
+
+            if (memberValues.custitem_fmt_next_receipt_date) {
+                receiptFields.nextReceiptDate = format.parse({
+                    value: memberValues.custitem_fmt_next_receipt_date,
+                    type: format.Type.DATE
+                });
+            }
+
+            // Mirror the item-level default-to-20 fallback (map(), quantityOnOrder) in case the
+            // member item hasn't been through the item-level path yet and its field is still blank.
+            receiptFields.nextReceiptQuantity = memberValues.custitem_fmt_next_receipt_quantity
+                ? parseFloat(memberValues.custitem_fmt_next_receipt_quantity)
+                : 20;
+
+            return receiptFields;
         }
 
         function getMemberItemInventory(kitMembers) {
@@ -1008,7 +1084,9 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     "AND",
                     ["item", "anyof", memberIds],
                     "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"]
+                    ["expecteddeliverydate", "onorafter", "daysago10"],
+                    "AND",
+                    ["receivinglocation", "anyof", "1"] // WC-549: exclude Castlegate (loc 7), only WC physical location (ID 1)
                 ],
                 columns: [
                     search.createColumn({ name: "item", summary: "GROUP" }),
@@ -1064,16 +1142,20 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             return quantities;
         }
 
+        // WC-549: called with the multi-member kit's full member list (not just out-of-stock
+        // members) - a kit's NEXT receipt depends on incoming PO/inbound-shipment data for every
+        // member, regardless of what happens to be on hand right now. Parameter name kept for
+        // minimal diff; "outOfStockMembers" here just means "members to look up receipts for".
         function findEarliestKitCompletionDate(outOfStockMembers) {
             var memberIds = outOfStockMembers.map(function(member) { return member.memberId; });
             var latestReceiptDate = null;
             var minKitQuantity = Infinity;
 
-            // Get inbound shipment dates for out-of-stock members (prioritize over POs)
+            // Get inbound shipment dates for these members (prioritize over POs)
             var inboundDates = getInboundShipmentDates(memberIds);
             var poDates = getPurchaseOrderDates(memberIds);
 
-            // Find the latest date among all out-of-stock items to complete the kit
+            // Find the latest date among all members to complete the kit
             for (var i = 0; i < outOfStockMembers.length; i++) {
                 var member = outOfStockMembers[i];
                 var receiptDate = inboundDates[member.memberId] || poDates[member.memberId];
@@ -1103,7 +1185,9 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     "AND",
                     ["item", "anyof", memberIds],
                     "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"]
+                    ["expecteddeliverydate", "onorafter", "daysago10"],
+                    "AND",
+                    ["receivinglocation", "anyof", "1"] // WC-549: exclude Castlegate (loc 7), only WC physical location (ID 1)
                 ],
                 columns: [
                     search.createColumn({ name: "item", summary: "GROUP" }),
@@ -1226,7 +1310,9 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     "AND",
                     ["item", "anyof", myItems],
                     "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"] // Optimized filter
+                    ["expecteddeliverydate", "onorafter", "daysago10"], // Optimized filter
+                    "AND",
+                    ["receivinglocation", "anyof", "1"] // WC-549: exclude Castlegate (loc 7), only WC physical location (ID 1)
                 ],
                 columns: [
                     search.createColumn({

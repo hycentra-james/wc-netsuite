@@ -103,18 +103,25 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
 
 
             } else {
-                var kitComponents = [];
                 var currentQuantity = 0;
                 currentQuantity = checkforKitInventory(itemId);
 
                 currentQuantity = currentQuantity.currentQuantity;
                 log.audit('This is current Quantity of Kit in Object', currentQuantity);
 
-                kitComponents = returnKitComponents(itemId, kitComponents);
-                log.debug('Sam 2.0 Kit Components', kitComponents);
+                // WC-549: previously only out-of-stock members (returnKitComponents) were looked
+                // up here, and only when there were any - if every member happened to be in stock
+                // right now, the lookup was skipped entirely and reduce() silently defaulted the
+                // date to "today" with quantity left null. Now we always look up ALL kit members'
+                // own next-receipt fields (already correctly maintained by the InvtPart branch
+                // above), regardless of current stock status. For kits with exactly one
+                // inventory-item member (true 100% of the time for "-000000000" SKUs per business
+                // rule), this is effectively a direct copy from that single child item.
+                var allKitMembers = returnAllKitMembers(itemId);
+                log.debug('WC-549 All Kit Members', allKitMembers);
 
-                if (kitComponents.length > 0) {
-                    receipts = findMyKitReceipts_ItemRecord(kitComponents, dateToPass);
+                if (allKitMembers.length > 0) {
+                    receipts = findMyKitReceipts_ItemRecord(allKitMembers, dateToPass);
 
                     receipts = _.sortBy(receipts, function (o) {
                         return o.receiptDate;
@@ -126,6 +133,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 log.debug('These are my Receipts passing Array', receipts);
 
                 var dateFound;
+                var kitQuantityOnOrder = null;
 
                 if (!!receipts && receipts.length > 0) {
                     var receiptLength = receipts.length;
@@ -136,10 +144,13 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     log.debug('This is my most Recent Receipt Date Object', receiptDate);
                     dateFound = receiptDate.receiptDate;
                     log.audit('This is my date Found', dateFound);
+
+                    // WC-549: carry the quantity through too - previously only the date was
+                    // ever read from receiptDate here.
+                    if (!!receiptDate.receiptQuantity) {
+                        kitQuantityOnOrder = receiptDate.receiptQuantity;
+                    }
                 }
-                // if (!!receiptDate.receiptQuantity && receiptDate.receiptQuantity != '' && receiptDate.receiptQuantity > 0) {
-                //     quantityOnOrder = receiptDate.receiptQuantity;
-                // }
                 newDate = dateFound;
                 //var newDate = calcDate(dateFound, today, recordType, itemType);
                 //log.debug('This is my Date to Set', newDate);
@@ -149,7 +160,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     key: itemId, // item id
                     value: {
                         'receiptDate': newDate, //next reciept date
-                        'quantityOnOrder': null,
+                        'quantityOnOrder': kitQuantityOnOrder,
                         'availableQuantity': currentQuantity,
                         'type': itemType//quantity
                     }
@@ -189,11 +200,22 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     }
                     log.debug('dateToSet', dateToSet);
 
+                    // WC-549: kit next-receipt QUANTITY was computed (or left null) in map() but
+                    // never submitted here - only date and available-quantity were written.
+                    // Wire it up, falling back to 20 (mirrors the item-level default-to-20
+                    // fallback used for InvtPart items above) when there's no receipt data to
+                    // compute from.
+                    var kitNextReceiptQty = (mapValueData.quantityOnOrder !== null && mapValueData.quantityOnOrder !== undefined)
+                        ? mapValueData.quantityOnOrder
+                        : 20;
+                    log.debug('kitNextReceiptQty', kitNextReceiptQty);
+
                     record.submitFields({
                         type: record.Type.KIT_ITEM,
                         id: mapKeyData,
                         values: {
                             'custitem_fmt_next_receipt_date': dateToSet,
+                            'custitem_fmt_next_receipt_quantity': kitNextReceiptQty,
                             'custitem_fmt_avail_kit_quantity': mapValueData.availableQuantity
                         }
                     })
@@ -609,6 +631,14 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                         search.createColumn({
                             name: "custitem_fmt_next_receipt_date", label: "Next Receipt Date",
                             summary: search.Summary.MAX
+                        }),
+                        // WC-549: also pull the member item(s)' own next-receipt quantity - this
+                        // field is already correctly maintained by the InvtPart branch above, but
+                        // previously only the date was ever read here, so
+                        // custitem_fmt_next_receipt_quantity never made it through to the kit.
+                        search.createColumn({
+                            name: "custitem_fmt_next_receipt_quantity", label: "Next Receipt Quantity",
+                            summary: search.Summary.SUM
                         })
                     ]
             });
@@ -624,6 +654,11 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     summary: search.Summary.MAX
                 });
 
+                var newReceiptQuantity = result.getValue({
+                    name: "custitem_fmt_next_receipt_quantity",
+                    summary: search.Summary.SUM
+                });
+
                 log.debug('This is for Shoaib!!!!!!', newReceiptDate);
 
                 if (!!newReceiptDate) {
@@ -633,6 +668,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     });
 
                     res2['receiptDate'] = newReceiptDate;
+                    res2['receiptQuantity'] = newReceiptQuantity;
 
                     log.debug('THis is your res2 Ojbect', res2);
                     resArr.push(res2);
@@ -827,6 +863,46 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                 return true;
             });
             return itemArray;
+        }
+
+        // WC-549: get ALL kit member item IDs (regardless of current stock status) - unlike
+        // returnKitComponents() above, which only returns OUT-OF-STOCK members. Needed to detect
+        // "kit has exactly one inventory-item component" (true 100% of the time for "-000000000"
+        // SKUs per business rule), and to look up real receipt data for every member instead of
+        // just the ones currently short, so multi-member kits with everything in stock still get
+        // a real next-receipt lookup instead of silently falling through to "today" in reduce().
+        function returnAllKitMembers(itemid) {
+            var members = [];
+
+            var kititemSearchObj = search.create({
+                type: "kititem",
+                filters:
+                    [
+                        ["type", "anyof", "Kit"],
+                        "AND",
+                        ["internalid", "anyof", itemid],
+                        "AND",
+                        ["memberitem.inventorylocation", "anyof", "1"],
+                        "AND",
+                        ["memberitem.type", "anyof", "InvtPart"]
+                    ],
+                columns:
+                    [
+                        search.createColumn({
+                            name: "internalid",
+                            join: "memberItem",
+                            label: "Internal ID"
+                        })
+                    ]
+            });
+
+            kititemSearchObj.run().each(function (result) {
+                // .run().each has a limit of 4,000 results
+                members.push(result.getValue({name: "internalid", join: 'memberItem'}));
+                return true;
+            });
+
+            return members;
         }
 
         return {
