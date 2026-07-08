@@ -11,10 +11,24 @@
  *
  * Also finds and updates kits when their component items are affected.
  * Expected 85-95% performance improvement vs processing all items.
+ *
+ * WC-549 FOLLOW-UP: the per-item/per-kit next-receipt-date, next-receipt-
+ * quantity, and kit-available-quantity CALCULATION logic (findMyReceipts,
+ * calcDate, checkforWeekend, processKitInventoryAndReceipts and its helpers,
+ * findKitsContainingComponents) has been extracted verbatim into
+ * ./lib/NextReceiptCalc.js so the new on-demand ManualNextReceiptSync_SL.js
+ * Suitelet can reuse the exact same code path instead of re-implementing it.
+ * This is a pure extract-and-require refactor - no calculation logic
+ * changed, only relocated. This script's own inputs/outputs are unchanged.
+ * The @NAmdConfig above is still required even though this script's own
+ * top-level code no longer references `underscore` directly - it's needed
+ * transitively because NextReceiptCalc.js's calculateInventoryItemReceiptFields()
+ * uses `_.sortBy`, and @NAmdConfig can only be declared by the entry-point
+ * script, so it has to stay here for that nested require to resolve.
  */
 
-define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', 'underscore', '../moment.min'],
-    function (search, record, query, runtime, error, format, _, moment) {
+define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', 'underscore', '../moment.min', './lib/NextReceiptCalc'],
+    function (search, record, query, runtime, error, format, _, moment, nextReceiptCalc) {
 
         function getInputData() {
             try {
@@ -87,7 +101,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     }
                 }
 
-                var affectedKits = findKitsContainingComponents(inventoryItemsFromEvents);
+                var affectedKits = nextReceiptCalc.findKitsContainingComponents(inventoryItemsFromEvents);
                 addUniqueItems(affectedKits);
 
                 log.audit('Merged items from all sources', {
@@ -458,96 +472,10 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             return itemIds;
         }
 
-        /**
-         * Find all kit items that contain the specified component items
-         * This ensures kits are recalculated when their components change
-         */
-        function findKitsContainingComponents(componentItemIds) {
-            if (!componentItemIds || componentItemIds.length === 0) {
-                return [];
-            }
-
-            var kitIds = [];
-            var processedKits = {};
-
-            // Process in batches to avoid filter limits with large component arrays
-            var BATCH_SIZE = 500;
-            var totalBatches = Math.ceil(componentItemIds.length / BATCH_SIZE);
-
-            log.audit('Finding kits containing components', {
-                'totalComponents': componentItemIds.length,
-                'batchSize': BATCH_SIZE,
-                'batches': totalBatches
-            });
-
-            for (var batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-                var startIdx = batchIndex * BATCH_SIZE;
-                var endIdx = Math.min(startIdx + BATCH_SIZE, componentItemIds.length);
-                var batchComponents = componentItemIds.slice(startIdx, endIdx);
-
-                var kitSearch = search.create({
-                    type: 'kititem',
-                    filters: [
-                        ['type', 'anyof', 'Kit'],
-                        'AND',
-                        ['memberitem.internalid', 'anyof', batchComponents]
-                    ],
-                    columns: [
-                        'internalid',
-                        'itemid',
-                        search.createColumn({ name: 'internalid', join: 'memberItem' }),
-                        search.createColumn({ name: 'itemid', join: 'memberItem' })
-                    ]
-                });
-
-                // Use runPaged to handle searches with > 4000 results
-                var pagedData = kitSearch.runPaged({
-                    pageSize: 1000
-                });
-
-                log.debug('Kit search paged info', {
-                    'batchNumber': batchIndex + 1,
-                    'pageCount': pagedData.pageRanges.length,
-                    'totalResults': pagedData.count
-                });
-
-                // Process each page
-                pagedData.pageRanges.forEach(function(pageRange) {
-                    var currentPage = pagedData.fetch({
-                        index: pageRange.index
-                    });
-
-                    currentPage.data.forEach(function(result) {
-                        var kitId = result.getValue('internalid');
-                        var kitName = result.getValue('itemid');
-                        var componentId = result.getValue({ name: 'internalid', join: 'memberItem' });
-                        var componentName = result.getValue({ name: 'itemid', join: 'memberItem' });
-
-                        if (!processedKits[kitId]) {
-                            kitIds.push(kitId);
-                            processedKits[kitId] = true;
-
-                            // Only log first 10 to avoid log bloat
-                            if (kitIds.length <= 10) {
-                                log.debug('Found kit containing component', {
-                                    'kitId': kitId,
-                                    'kitName': kitName,
-                                    'componentId': componentId,
-                                    'componentName': componentName
-                                });
-                            }
-                        }
-                    });
-                });
-            }
-
-            log.audit('Kit component search completed', {
-                'kitsFound': kitIds.length,
-                'componentsSearched': componentItemIds.length
-            });
-
-            return kitIds;
-        }
+        // WC-549 FOLLOW-UP: findKitsContainingComponents() moved verbatim to
+        // ./lib/NextReceiptCalc.js (nextReceiptCalc.findKitsContainingComponents)
+        // so ManualNextReceiptSync_SL.js can reuse the same component->parent-kit
+        // search for single-record item->kit propagation. Called below.
 
         function map(context) {
             try {
@@ -570,54 +498,25 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     });
                 }
 
-                var receiptDate = {};
-                receiptDate['receiptQuantity'] = "";
-                var quantityOnOrder = 20;
-                var today = new Date();
-                var recordType = "";
-
-                var day = today.getDate();
-                var month = today.getMonth() + 1;
-                var year = today.getFullYear();
-                var dateToPass = month + "/" + day + "/" + year;
-
-                var receipts = [];
-
                 if (itemType == 'InvtPart') {
-                    receipts = findMyReceipts(itemId, dateToPass);
-                    if (!!receipts && receipts.length > 0) {
-                        receipts = _.sortBy(receipts, function (o) {
-                            return o.receiptDate
-                        });
-                        receipts = receipts.reverse();
-                    }
-
-                    if (!!receipts && receipts.length > 0) {
-                        var receiptLength = receipts.length;
-                        receiptDate = receipts[receiptLength - 1];
-                        recordType = receiptDate.type;
-                        var dateFound = receiptDate.receiptDate;
-                    }
-
-                    if (!!receiptDate.receiptQuantity) {
-                        quantityOnOrder = receiptDate.receiptQuantity;
-                    }
-
-                    var newDate = calcDate(dateFound, today, recordType, itemType);
-                    newDate = checkforWeekend(newDate);
+                    // WC-549 FOLLOW-UP: extracted verbatim into
+                    // NextReceiptCalc.calculateInventoryItemReceiptFields() -
+                    // same findMyReceipts + sort/select + calcDate +
+                    // checkforWeekend sequence that used to run inline here.
+                    var itemReceiptFields = nextReceiptCalc.calculateInventoryItemReceiptFields(itemId);
 
                     context.write({
                         key: itemId,
                         value: {
-                            'receiptDate': newDate,
-                            'quantityOnOrder': quantityOnOrder,
+                            'receiptDate': itemReceiptFields.receiptDate,
+                            'quantityOnOrder': itemReceiptFields.quantityOnOrder,
                             'type': itemType
                         }
                     });
 
                 } else {
                     // Kit processing - NEW LOGIC
-                    var kitResult = processKitInventoryAndReceipts(itemId);
+                    var kitResult = nextReceiptCalc.processKitInventoryAndReceipts(itemId);
                     
                     log.debug('Kit processing result', {
                         'kitId': itemId,
@@ -691,12 +590,11 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                         columns: ['itemid', 'custitem_fmt_next_receipt_date', 'custitem_fmt_next_receipt_quantity', 'custitem_fmt_avail_kit_quantity']
                     });
 
-                    var dateToSet;
-                    if (!!mapValueData.receiptDate) {
-                        dateToSet = new Date(mapValueData.receiptDate);
-                    } else {
-                        dateToSet = new Date();
-                    }
+                    // WC-549 FOLLOW-UP: these two fallbacks are now the shared
+                    // NextReceiptCalc.resolveKitReceiptDate/resolveKitReceiptQuantity
+                    // helpers (logic unchanged) so the Suitelet doesn't have to
+                    // duplicate them.
+                    var dateToSet = nextReceiptCalc.resolveKitReceiptDate(mapValueData.receiptDate);
                     var newAvailableQty = mapValueData.availableQuantity;
 
                     // WC-549: the kit's next-receipt QUANTITY was computed in map()
@@ -705,9 +603,7 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
                     // written. Wire it up here, falling back to 20 (mirrors the item-level
                     // default-to-20 fallback used for InvtPart items above) when there's no
                     // PO/inbound-shipment/member data to compute from.
-                    var newNextReceiptQty = (mapValueData.quantityOnOrder !== null && mapValueData.quantityOnOrder !== undefined)
-                        ? mapValueData.quantityOnOrder
-                        : 20;
+                    var newNextReceiptQty = nextReceiptCalc.resolveKitReceiptQuantity(mapValueData.quantityOnOrder);
 
                     log.debug('Updating Kit Item', {
                         itemId: mapKeyData,
@@ -763,489 +659,14 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             handleErrorInStage('reduce', reduceSummary);
         }
 
-        // NEW KIT PROCESSING FUNCTION - Implements sophisticated kit logic
-        function processKitInventoryAndReceipts(kitId) {
-            var result = {
-                availableQuantity: 0,
-                nextReceiptDate: null,
-                nextReceiptQuantity: null,
-                allMemberItemsInStock: false
-            };
-
-            try {
-                // Step 1: Get kit member items with their required quantities
-                var kitMembers = getKitMemberDetails(kitId);
-                
-                if (!kitMembers || kitMembers.length === 0) {
-                    log.debug('No kit members found', kitId);
-                    return result;
-                }
-
-                log.debug('Kit members found', {
-                    'kitId': kitId,
-                    'memberCount': kitMembers.length,
-                    'members': kitMembers
-                });
-
-                // Step 2: Check current inventory for each member item
-                var memberInventory = getMemberItemInventory(kitMembers);
-                
-                // Step 3: Calculate available kit quantity (minimum based on member ratios)
-                var availableKits = calculateAvailableKitQuantity(kitMembers, memberInventory);
-                result.availableQuantity = availableKits;
-
-                // Step 4: Check if all member items have sufficient stock
-                var allInStock = true;
-                var outOfStockMembers = [];
-                
-                for (var i = 0; i < kitMembers.length; i++) {
-                    var member = kitMembers[i];
-                    var availableQty = memberInventory[member.memberId] || 0;
-                    var requiredQty = member.memberQuantity;
-                    
-                    if (availableQty < requiredQty) {
-                        allInStock = false;
-                        outOfStockMembers.push({
-                            memberId: member.memberId,
-                            memberItemId: member.memberItemId,
-                            availableQty: availableQty,
-                            requiredQty: requiredQty,
-                            shortfall: requiredQty - availableQty
-                        });
-                    }
-                }
-
-                result.allMemberItemsInStock = allInStock;
-
-                if (!allInStock) {
-                    // Kit is not currently fillable if any member is short
-                    log.debug('Some kit members out of stock', {
-                        'kitId': kitId,
-                        'outOfStockMembers': outOfStockMembers
-                    });
-
-                    result.availableQuantity = 0; // Kit not available if any member is out of stock
-                }
-
-                // WC-549: Next-receipt date/quantity derivation.
-                //
-                // Kits whose item ID ends in "-000000000" have exactly ONE inventory-item
-                // component 100% of the time (naming convention). Detected generally here as
-                // "kit has exactly one member" rather than string-matching the SKU suffix, since
-                // that's more robust and self-documenting. For those kits, the member's own
-                // custitem_fmt_next_receipt_date / custitem_fmt_next_receipt_quantity fields are
-                // already correctly maintained by the item-level path (findMyReceipts, above), so
-                // we copy them directly instead of re-deriving PO/inbound-shipment logic a second
-                // time with different branching. This guarantees kit/item parity by construction.
-                //
-                // Kits with more than one member (rare/none today per business) always go through
-                // the real PO/inbound-shipment lookup - there is no more "all members currently in
-                // stock -> stamp today" shortcut. Current on-hand stock status doesn't tell us when
-                // the kit's NEXT receipt is actually coming.
-                if (kitMembers.length === 1) {
-                    var singleMemberReceipt = getSingleMemberReceiptFields(kitMembers[0].memberId);
-                    result.nextReceiptDate = singleMemberReceipt.nextReceiptDate;
-                    result.nextReceiptQuantity = singleMemberReceipt.nextReceiptQuantity;
-
-                    log.debug('Single-member kit: copied receipt fields from child item', {
-                        'kitId': kitId,
-                        'memberId': kitMembers[0].memberId,
-                        'memberItemId': kitMembers[0].memberItemId,
-                        'nextReceiptDate': result.nextReceiptDate,
-                        'nextReceiptQuantity': result.nextReceiptQuantity
-                    });
-                } else {
-                    var earliestCompleteDate = findEarliestKitCompletionDate(kitMembers);
-                    result.nextReceiptDate = earliestCompleteDate.date;
-                    result.nextReceiptQuantity = calculateKitReceiptQuantity(kitMembers);
-
-                    log.debug('Multi-member kit: derived receipt fields from real PO/inbound-shipment lookup', {
-                        'kitId': kitId,
-                        'memberCount': kitMembers.length,
-                        'nextReceiptDate': result.nextReceiptDate,
-                        'nextReceiptQuantity': result.nextReceiptQuantity
-                    });
-                }
-
-                return result;
-
-            } catch (e) {
-                log.error('Error in processKitInventoryAndReceipts', {
-                    'kitId': kitId,
-                    'error': e
-                });
-                return result;
-            }
-        }
-
-        function getKitMemberDetails(kitId) {
-            var members = [];
-            
-            var kitMemberSearch = search.create({
-                type: "kititem",
-                filters: [
-                    ["internalid", "anyof", kitId],
-                    "AND",
-                    ["type", "anyof", "Kit"]
-                ],
-                columns: [
-                    search.createColumn({ name: "internalid", join: "memberItem", label: "Member ID" }),
-                    search.createColumn({ name: "itemid", join: "memberItem", label: "Member Item ID" }),
-                    search.createColumn({ name: "memberquantity", label: "Member Quantity" }),
-                    search.createColumn({ name: "type", join: "memberItem", label: "Member Type" })
-                ]
-            });
-
-            kitMemberSearch.run().each(function(result) {
-                var memberId = result.getValue({ name: "internalid", join: "memberItem" });
-                var memberItemId = result.getValue({ name: "itemid", join: "memberItem" });
-                var memberQuantity = parseFloat(result.getValue("memberquantity")) || 1;
-                var memberType = result.getValue({ name: "type", join: "memberItem" });
-
-                if (memberId && memberType === 'InvtPart') { // Only inventory items
-                    members.push({
-                        memberId: memberId,
-                        memberItemId: memberItemId,
-                        memberQuantity: memberQuantity,
-                        memberType: memberType
-                    });
-                }
-
-                return true;
-            });
-
-            return members;
-        }
-
-        /**
-         * WC-549: For single-member kits (e.g. "-000000000" SKUs, which have exactly one
-         * inventory-item component by naming convention), the kit's next-receipt date/quantity
-         * can just be copied from the member item's own custitem_fmt_next_receipt_date /
-         * custitem_fmt_next_receipt_quantity fields - those are already correctly maintained by
-         * the item-level path (findMyReceipts / map()'s InvtPart branch) earlier in this same
-         * script run. This is a direct field read, not a recompute, so it's safe to call here.
-         */
-        function getSingleMemberReceiptFields(memberId) {
-            var receiptFields = {
-                nextReceiptDate: null,
-                nextReceiptQuantity: null
-            };
-
-            var memberValues = search.lookupFields({
-                type: search.Type.INVENTORY_ITEM,
-                id: memberId,
-                columns: ['custitem_fmt_next_receipt_date', 'custitem_fmt_next_receipt_quantity']
-            });
-
-            if (memberValues.custitem_fmt_next_receipt_date) {
-                receiptFields.nextReceiptDate = format.parse({
-                    value: memberValues.custitem_fmt_next_receipt_date,
-                    type: format.Type.DATE
-                });
-            }
-
-            // Mirror the item-level default-to-20 fallback (map(), quantityOnOrder) in case the
-            // member item hasn't been through the item-level path yet and its field is still blank.
-            receiptFields.nextReceiptQuantity = memberValues.custitem_fmt_next_receipt_quantity
-                ? parseFloat(memberValues.custitem_fmt_next_receipt_quantity)
-                : 20;
-
-            return receiptFields;
-        }
-
-        function getMemberItemInventory(kitMembers) {
-            var inventory = {};
-            var memberIds = kitMembers.map(function(member) { return member.memberId; });
-
-            if (memberIds.length === 0) {
-                return inventory;
-            }
-
-            // Pre-populate all members with 0 so items with no inventory record
-            // at location 1 are explicitly treated as zero rather than relying on || 0 fallback
-            for (var i = 0; i < memberIds.length; i++) {
-                inventory[memberIds[i]] = 0;
-            }
-
-            // Use item search with locationquantityavailable to ensure committed quantities are subtracted
-            // locationquantityavailable = On Hand - Committed (accounts for orders)
-            var inventorySearch = search.create({
-                type: "item",
-                filters: [
-                    ["internalid", "anyof", memberIds],
-                    "AND",
-                    ["inventorylocation", "anyof", "1"] // Main location - adjust if needed
-                ],
-                columns: [
-                    search.createColumn({
-                        name: "internalid",
-                        summary: "GROUP",
-                        label: "Item ID"
-                    }),
-                    search.createColumn({
-                        name: "locationquantityavailable",
-                        summary: "SUM",
-                        label: "Available (On Hand - Committed)"
-                    }),
-                    search.createColumn({
-                        name: "locationquantityonhand",
-                        summary: "SUM",
-                        label: "On Hand"
-                    })
-                ]
-            });
-
-            var itemsFoundInSearch = 0;
-            inventorySearch.run().each(function(result) {
-                var itemId = result.getValue({ name: "internalid", summary: "GROUP" });
-                var availableQty = parseFloat(result.getValue({ name: "locationquantityavailable", summary: "SUM" })) || 0;
-                var onHandQty = parseFloat(result.getValue({ name: "locationquantityonhand", summary: "SUM" })) || 0;
-
-                inventory[itemId] = availableQty;  // Overwrite the 0 pre-population with actual value
-                itemsFoundInSearch++;
-
-                // Log inventory details for verification (first 5 items to avoid log bloat)
-                if (itemsFoundInSearch <= 5) {
-                    log.debug('Member item inventory', {
-                        'itemId': itemId,
-                        'availableQty': availableQty,
-                        'onHandQty': onHandQty,
-                        'committed': onHandQty - availableQty
-                    });
-                }
-
-                return true;
-            });
-
-            // Log any members that had no inventory record at location 1 (remained at 0)
-            var missingItems = [];
-            for (var j = 0; j < memberIds.length; j++) {
-                if (inventory[memberIds[j]] === 0) {
-                    missingItems.push(memberIds[j]);
-                }
-            }
-            if (missingItems.length > 0) {
-                log.debug('Member items with zero or no inventory at location 1', {
-                    'count': missingItems.length,
-                    'memberIds': missingItems.slice(0, 10).join(', ') + (missingItems.length > 10 ? '...' : '')
-                });
-            }
-
-            return inventory;
-        }
-
-        function calculateAvailableKitQuantity(kitMembers, memberInventory) {
-            var minKits = Infinity;
-
-            for (var i = 0; i < kitMembers.length; i++) {
-                var member = kitMembers[i];
-                var availableQty = memberInventory[member.memberId] || 0;
-                var requiredQty = member.memberQuantity;
-                
-                var possibleKits = Math.floor(availableQty / requiredQty);
-                minKits = Math.min(minKits, possibleKits);
-            }
-
-            return minKits === Infinity ? 0 : minKits;
-        }
-
-        function calculateKitReceiptQuantity(kitMembers) {
-            var memberIds = kitMembers.map(function(member) { return member.memberId; });
-            var totalExpectedKits = 0;
-
-            if (memberIds.length === 0) {
-                return 0;
-            }
-
-            // Get inbound shipments for member items
-            var inboundQty = getInboundShipmentQuantities(memberIds);
-            var poQty = getPurchaseOrderQuantities(memberIds);
-
-            // Calculate how many complete kits can be made from expected receipts
-            var minKitsFromReceipts = Infinity;
-
-            for (var i = 0; i < kitMembers.length; i++) {
-                var member = kitMembers[i];
-                var expectedQty = (inboundQty[member.memberId] || 0) + (poQty[member.memberId] || 0);
-                var possibleKits = Math.floor(expectedQty / member.memberQuantity);
-                minKitsFromReceipts = Math.min(minKitsFromReceipts, possibleKits);
-            }
-
-            return minKitsFromReceipts === Infinity ? 0 : minKitsFromReceipts;
-        }
-
-        function getInboundShipmentQuantities(memberIds) {
-            var quantities = {};
-
-            var inboundSearch = search.create({
-                type: "inboundshipment",
-                filters: [
-                    ["status", "anyof", ["inTransit", "toBeShipped"]],
-                    "AND",
-                    ["item", "anyof", memberIds],
-                    "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"],
-                    "AND",
-                    ["receivinglocation", "anyof", "1"] // WC-549: exclude Castlegate (loc 7), only WC physical location (ID 1)
-                ],
-                columns: [
-                    search.createColumn({ name: "item", summary: "GROUP" }),
-                    search.createColumn({ name: "quantityexpected", summary: "SUM" })
-                ]
-            });
-
-            inboundSearch.run().each(function(result) {
-                var itemId = result.getValue({ name: "item", summary: "GROUP" });
-                var qty = parseFloat(result.getValue({ name: "quantityexpected", summary: "SUM" })) || 0;
-                quantities[itemId] = qty;
-                return true;
-            });
-
-            return quantities;
-        }
-
-        function getPurchaseOrderQuantities(memberIds) {
-            var quantities = {};
-
-            var poSearch = search.create({
-                type: "transaction",
-                filters: [
-                    ["type", "anyof", "PurchOrd"],
-                    "AND",
-                    ["mainline", "is", "F"],
-                    "AND",
-                    ["item", "anyof", memberIds],
-                    "AND",
-                    ["expectedreceiptdate", "onorafter", "daysago45"]
-                ],
-                columns: [
-                    search.createColumn({ name: "item", summary: "GROUP" }),
-                    search.createColumn({ 
-                        name: "formulanumeric", 
-                        formula: "ABS({quantity}-{quantityshiprecv})", 
-                        summary: "SUM" 
-                    })
-                ]
-            });
-
-            poSearch.run().each(function(result) {
-                var itemId = result.getValue({ name: "item", summary: "GROUP" });
-                var qty = parseFloat(result.getValue({ 
-                    name: "formulanumeric", 
-                    formula: "ABS({quantity}-{quantityshiprecv})", 
-                    summary: "SUM" 
-                })) || 0;
-                quantities[itemId] = qty;
-                return true;
-            });
-
-            return quantities;
-        }
-
-        // WC-549: called with the multi-member kit's full member list (not just out-of-stock
-        // members) - a kit's NEXT receipt depends on incoming PO/inbound-shipment data for every
-        // member, regardless of what happens to be on hand right now. Parameter name kept for
-        // minimal diff; "outOfStockMembers" here just means "members to look up receipts for".
-        function findEarliestKitCompletionDate(outOfStockMembers) {
-            var memberIds = outOfStockMembers.map(function(member) { return member.memberId; });
-            var latestReceiptDate = null;
-            var minKitQuantity = Infinity;
-
-            // Get inbound shipment dates for these members (prioritize over POs)
-            var inboundDates = getInboundShipmentDates(memberIds);
-            var poDates = getPurchaseOrderDates(memberIds);
-
-            // Find the latest date among all members to complete the kit
-            for (var i = 0; i < outOfStockMembers.length; i++) {
-                var member = outOfStockMembers[i];
-                var receiptDate = inboundDates[member.memberId] || poDates[member.memberId];
-                
-                if (receiptDate && (!latestReceiptDate || receiptDate > latestReceiptDate)) {
-                    latestReceiptDate = receiptDate;
-                }
-            }
-
-            // Calculate minimum kit quantity based on expected receipts
-            // This is simplified - could be enhanced with more sophisticated logic
-            minKitQuantity = 1; // Conservative estimate
-
-            return {
-                date: latestReceiptDate,
-                quantity: minKitQuantity === Infinity ? 1 : minKitQuantity
-            };
-        }
-
-        function getInboundShipmentDates(memberIds) {
-            var dates = {};
-
-            var inboundSearch = search.create({
-                type: "inboundshipment",
-                filters: [
-                    ["status", "anyof", ["inTransit", "toBeShipped"]],
-                    "AND",
-                    ["item", "anyof", memberIds],
-                    "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"],
-                    "AND",
-                    ["receivinglocation", "anyof", "1"] // WC-549: exclude Castlegate (loc 7), only WC physical location (ID 1)
-                ],
-                columns: [
-                    search.createColumn({ name: "item", summary: "GROUP" }),
-                    search.createColumn({ name: "expecteddeliverydate", summary: "MIN", sort: search.Sort.ASC })
-                ]
-            });
-
-            inboundSearch.run().each(function(result) {
-                var itemId = result.getValue({ name: "item", summary: "GROUP" });
-                var dateStr = result.getValue({ name: "expecteddeliverydate", summary: "MIN" });
-                
-                if (dateStr) {
-                    dates[itemId] = format.parse({
-                        value: dateStr,
-                        type: format.Type.DATE
-                    });
-                }
-                return true;
-            });
-
-            return dates;
-        }
-
-        function getPurchaseOrderDates(memberIds) {
-            var dates = {};
-
-            var poSearch = search.create({
-                type: "transaction",
-                filters: [
-                    ["type", "anyof", "PurchOrd"],
-                    "AND",
-                    ["mainline", "is", "F"],
-                    "AND",
-                    ["item", "anyof", memberIds],
-                    "AND",
-                    ["expectedreceiptdate", "onorafter", "daysago45"]
-                ],
-                columns: [
-                    search.createColumn({ name: "item", summary: "GROUP" }),
-                    search.createColumn({ name: "expectedreceiptdate", summary: "MIN", sort: search.Sort.ASC })
-                ]
-            });
-
-            poSearch.run().each(function(result) {
-                var itemId = result.getValue({ name: "item", summary: "GROUP" });
-                var dateStr = result.getValue({ name: "expectedreceiptdate", summary: "MIN" });
-                
-                if (dateStr) {
-                    dates[itemId] = format.parse({
-                        value: dateStr,
-                        type: format.Type.DATE
-                    });
-                }
-                return true;
-            });
-
-            return dates;
-        }
+        // WC-549 FOLLOW-UP: processKitInventoryAndReceipts() and its helpers
+        // (getKitMemberDetails, getSingleMemberReceiptFields, getMemberItemInventory,
+        // calculateAvailableKitQuantity, calculateKitReceiptQuantity,
+        // getInboundShipmentQuantities, getPurchaseOrderQuantities,
+        // findEarliestKitCompletionDate, getInboundShipmentDates, getPurchaseOrderDates)
+        // moved verbatim to ./lib/NextReceiptCalc.js so ManualNextReceiptSync_SL.js can
+        // reuse the exact same kit calculation path. Called via
+        // nextReceiptCalc.processKitInventoryAndReceipts(kitId) in map(), above.
 
         // Include all the helper functions from the original script
         function checkforKitInventory(invArr) {
@@ -1299,117 +720,10 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             return searchResult;
         }
 
-        function findMyReceipts(myItems, today) {
-            var resArr = [];
-            var inbShipsFound = false;
+        // WC-549 FOLLOW-UP: findMyReceipts() moved verbatim to
+        // ./lib/NextReceiptCalc.js (used internally by
+        // nextReceiptCalc.calculateInventoryItemReceiptFields()).
 
-            var inboundshipmentSearchObj = search.create({
-                type: "inboundshipment",
-                filters: [
-                    ["status", "anyof", ["inTransit", "toBeShipped"]],
-                    "AND",
-                    ["item", "anyof", myItems],
-                    "AND",
-                    ["expecteddeliverydate", "onorafter", "daysago10"], // Optimized filter
-                    "AND",
-                    ["receivinglocation", "anyof", "1"] // WC-549: exclude Castlegate (loc 7), only WC physical location (ID 1)
-                ],
-                columns: [
-                    search.createColumn({
-                        name: "expecteddeliverydate",
-                        summary: "GROUP",
-                        sort: search.Sort.ASC,
-                        label: "Expected Delivery Date"
-                    }),
-                    search.createColumn({
-                        name: "quantityexpected",
-                        summary: "SUM",
-                        label: "Items - Quantity Expected"
-                    })
-                ]
-            });
-
-            inboundshipmentSearchObj.run().each(function (result) {
-                var res2 = {};
-                var newReceiptDate = result.getValue({
-                    name: "expecteddeliverydate",
-                    summary: search.Summary.GROUP
-                });
-
-                if (!!newReceiptDate) {
-                    newReceiptDate = format.parse({
-                        value: newReceiptDate,
-                        type: format.Type.DATE
-                    });
-
-                    res2['receiptDate'] = newReceiptDate;
-                    res2['receiptQuantity'] = result.getValue({
-                        name: "quantityexpected",
-                        summary: search.Summary.SUM
-                    });
-                    res2['type'] = "InboundShipment";
-                    resArr.push(res2);
-                }
-                inbShipsFound = true;
-                return true;
-            });
-
-            if (!inbShipsFound) {
-                var transactionSearchObj = search.create({
-                    type: "transaction",
-                    filters: [
-                        ["type", "anyof", "PurchOrd"],
-                        "AND",
-                        ["mainline", "is", "F"],
-                        "AND",
-                        ["shipping", "is", "F"],
-                        "AND",
-                        ["taxline", "is", "F"],
-                        "AND",
-                        ["item", "anyof", myItems],
-                        "AND",
-                        ["expectedreceiptdate", "onorafter", "daysago45"] // Optimized filter
-                    ],
-                    columns: [
-                        search.createColumn({name: "item", label: "Item"}),
-                        search.createColumn({
-                            name: "formulanumeric",
-                            formula: "ABS({quantity}-{quantityshiprecv})",
-                            label: "Updated Quantity"
-                        }),
-                        search.createColumn({
-                            name: "expectedreceiptdate",
-                            sort: search.Sort.ASC,
-                            label: "Expected Receipt Date"
-                        })
-                    ]
-                });
-
-                transactionSearchObj.run().each(function (result) {
-                    var res = {};
-                    var receiptDate2 = result.getValue({
-                        name: "expectedreceiptdate",
-                    });
-
-                    if (!!receiptDate2) {
-                        receiptDate2 = format.parse({
-                            value: receiptDate2,
-                            type: format.Type.DATE
-                        });
-
-                        res['receiptDate'] = receiptDate2;
-                        res['receiptQuantity'] = result.getValue({
-                            name: "formulanumeric",
-                        });
-                        res['type'] = "PurchaseOrder";
-                        resArr.push(res);
-                    }
-                    return true;
-                });
-            }
-
-            return resArr;
-        }
 
         function findMyKitReceipts_ItemRecord(myItems, today) {
             var resArr = [];
@@ -1449,82 +763,10 @@ define(['N/search', 'N/record', 'N/query', 'N/runtime', 'N/error', 'N/format', '
             return resArr;
         }
 
-        function calcDate(receiptDate, trandate, type, recordType) {
-            var myItemType = recordType;
-            var dateToReturn;
-            var tenDayDelay = parseInt(10);
-            var thirtyDayDelay = parseInt(45);
-            var ninetyDayDelay = parseInt(90);
+        // WC-549 FOLLOW-UP: calcDate() and checkforWeekend() moved verbatim to
+        // ./lib/NextReceiptCalc.js (used internally by
+        // nextReceiptCalc.calculateInventoryItemReceiptFields()).
 
-            if (myItemType == "InvtPart") {
-                if (!!receiptDate && receiptDate != '' && type == "InboundShipment") {
-                    receiptDate = new Date(receiptDate);
-                    receiptDate = receiptDate.setDate(receiptDate.getDate() + tenDayDelay);
-                    dateToReturn = format.parse({
-                        value: new Date(receiptDate),
-                        type: format.Type.DATE
-                    });
-                } else if (!!receiptDate && receiptDate != '' && type == "PurchaseOrder") {
-                    receiptDate = new Date(receiptDate);
-                    receiptDate = receiptDate.setDate(receiptDate.getDate() + thirtyDayDelay);
-                    dateToReturn = format.parse({
-                        value: new Date(receiptDate),
-                        type: format.Type.DATE
-                    });
-                } else {
-                    trandate = new Date(trandate);
-                    trandate = trandate.setDate(trandate.getDate() + ninetyDayDelay);
-                    dateToReturn = format.parse({
-                        value: new Date(trandate),
-                        type: format.Type.DATE
-                    });
-                }
-                return dateToReturn;
-            } else {
-                if (receiptDate == "") {
-                    trandate = new Date(trandate);
-                    trandate = trandate.setDate(trandate.getDate() + ninetyDayDelay);
-                    dateToReturn = format.parse({
-                        value: new Date(trandate),
-                        type: format.Type.DATE
-                    });
-                } else {
-                    dateToReturn = receiptDate;
-                }
-                return dateToReturn;
-            }
-        }
-
-        function checkforWeekend(dateToReturn) {
-            var isSaturday = parseInt(2);
-            var isSunday = parseInt(1);
-            var checkDate;
-
-            checkDate = dateToReturn.getDay();
-
-            if (checkDate === 6) {
-                dateToReturn = new Date(dateToReturn);
-                dateToReturn = dateToReturn.setDate(dateToReturn.getDate() + isSaturday);
-                dateToReturn = format.parse({
-                    value: new Date(dateToReturn),
-                    type: format.Type.DATE
-                });
-            } else if (checkDate == 0) {
-                dateToReturn = new Date(dateToReturn);
-                dateToReturn = dateToReturn.setDate(dateToReturn.getDate() + isSunday);
-                dateToReturn = format.parse({
-                    value: new Date(dateToReturn),
-                    type: format.Type.DATE
-                });
-            } else {
-                dateToReturn = format.parse({
-                    value: new Date(dateToReturn),
-                    type: format.Type.DATE
-                });
-            }
-
-            return dateToReturn;
-        }
 
         function returnKitComponents(itemid, itemArray) {
             var kititemSearchObj = search.create({
