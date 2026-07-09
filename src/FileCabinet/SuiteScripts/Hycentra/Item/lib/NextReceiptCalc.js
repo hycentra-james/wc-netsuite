@@ -333,6 +333,7 @@ define(['N/search', 'N/format', 'underscore'],
                         outOfStockMembers.push({
                             memberId: member.memberId,
                             memberItemId: member.memberItemId,
+                            memberQuantity: member.memberQuantity, // WC-549: needed by calculateKitReceiptQuantity's per-member division when this array is reused as the gating set
                             availableQty: availableQty,
                             requiredQty: requiredQty,
                             shortfall: requiredQty - availableQty
@@ -367,6 +368,12 @@ define(['N/search', 'N/format', 'underscore'],
                 // the real PO/inbound-shipment lookup - there is no more "all members currently in
                 // stock -> stamp today" shortcut. Current on-hand stock status doesn't tell us when
                 // the kit's NEXT receipt is actually coming.
+                //
+                // WC-549 fix: only the GATING members (the ones short of their required quantity,
+                // already computed above as outOfStockMembers) drive the kit-level date/quantity.
+                // A member that already has enough stock on hand must never gate the kit's next
+                // receipt - looking at ALL members (including well-stocked ones) was the root cause
+                // of WC-549.
                 if (kitMembers.length === 1) {
                     var singleMemberReceipt = getSingleMemberReceiptFields(kitMembers[0].memberId);
                     result.nextReceiptDate = singleMemberReceipt.nextReceiptDate;
@@ -380,16 +387,53 @@ define(['N/search', 'N/format', 'underscore'],
                         'nextReceiptQuantity': result.nextReceiptQuantity
                     });
                 } else {
-                    var earliestCompleteDate = findEarliestKitCompletionDate(kitMembers);
-                    result.nextReceiptDate = earliestCompleteDate.date;
-                    result.nextReceiptQuantity = calculateKitReceiptQuantity(kitMembers);
+                    var gatingMembers = outOfStockMembers; // WC-549: gating set = short members only
 
-                    log.debug('Multi-member kit: derived receipt fields from real PO/inbound-shipment lookup', {
-                        'kitId': kitId,
-                        'memberCount': kitMembers.length,
-                        'nextReceiptDate': result.nextReceiptDate,
-                        'nextReceiptQuantity': result.nextReceiptQuantity
-                    });
+                    if (gatingMembers.length === 0) {
+                        // Every member already has enough stock on hand - nothing is gating this
+                        // kit, so there is no shortage-driven next receipt to report.
+                        result.nextReceiptDate = null;
+                        result.nextReceiptQuantity = null;
+
+                        log.debug('Multi-member kit: all members sufficiently in stock, no gating member', {
+                            'kitId': kitId,
+                            'memberCount': kitMembers.length
+                        });
+                    } else {
+                        var kitCompletion = findLatestGatingMemberDate(gatingMembers);
+
+                        if (kitCompletion.hasMissingData) {
+                            // WC-549 fix: a gating member with neither an open PO nor an inbound
+                            // shipment forces the WHOLE kit to the same fallback the item-level path
+                            // uses (today + 90 days, quantity 20) - channels must always get an
+                            // estimate, never a blank/null. Route through calcDate's own "no
+                            // receiptDate" branch instead of duplicating the 90-day math.
+                            var fallbackDate = calcDate(undefined, new Date(), undefined, 'InvtPart');
+                            fallbackDate = checkforWeekend(fallbackDate);
+
+                            result.nextReceiptDate = fallbackDate;
+                            result.nextReceiptQuantity = 20;
+
+                            log.debug('Multi-member kit: gating member missing PO/inbound data, using kit-level fallback', {
+                                'kitId': kitId,
+                                'gatingMemberIds': gatingMembers.map(function (m) { return m.memberId; }),
+                                'nextReceiptDate': result.nextReceiptDate,
+                                'nextReceiptQuantity': result.nextReceiptQuantity
+                            });
+                        } else {
+                            result.nextReceiptDate = kitCompletion.date;
+                            result.nextReceiptQuantity = calculateKitReceiptQuantity(gatingMembers, memberInventory);
+
+                            log.debug('Multi-member kit: derived receipt fields from gating (short) members only', {
+                                'kitId': kitId,
+                                'memberCount': kitMembers.length,
+                                'gatingMemberCount': gatingMembers.length,
+                                'gatingMemberIds': gatingMembers.map(function (m) { return m.memberId; }),
+                                'nextReceiptDate': result.nextReceiptDate,
+                                'nextReceiptQuantity': result.nextReceiptQuantity
+                            });
+                        }
+                    }
                 }
 
                 return result;
@@ -584,26 +628,59 @@ define(['N/search', 'N/format', 'underscore'],
             return minKits === Infinity ? 0 : minKits;
         }
 
-        // Moved verbatim from UpdateQuantity_ReceiptDate_SalesOrderDriven.js
-        function calculateKitReceiptQuantity(kitMembers) {
-            var memberIds = kitMembers.map(function(member) { return member.memberId; });
-            var totalExpectedKits = 0;
+        // WC-549 fix: takes the GATING member set (short members only, passed by the caller)
+        // plus memberInventory (each member's current available quantity, already computed by
+        // getMemberItemInventory in processKitInventoryAndReceipts) so the formula is
+        // floor((available + incoming) / memberQuantity) per member, MIN across EVERY gating
+        // member passed in - a kit's true next-receipt quantity is bounded by whichever short
+        // member has the least combined (on-hand + incoming), not just the member that happened
+        // to gate the date.
+        //
+        // WC-549 follow-up (live-data validation, 2026-07-08 - EB42C-0600/14827): the previous
+        // version of this function computed incomingQty as inboundQty + poQty (both summed).
+        // That double-counts: an open PO's ABS(quantity - quantityshiprecv) already IS the item's
+        // total not-yet-received commitment, whether or not any of it has already been placed
+        // onto an Inbound Shipment container (quantityshiprecv only moves on an actual Item
+        // Receipt, not when a shipment record is created). Inbound Shipment lines are a logistics
+        // breakdown of PART of that same PO commitment, not a second, separate incoming quantity.
+        // Verified against live production data: EMPIRE-CT-42-CW (member 14806) has one open PO
+        // (120 units) with 6 Inbound Shipment lines against it (summing to 115 of those same 120
+        // units) - the old code computed 115 + 120 = 235; the correct total is 120. Fix: prefer
+        // the open-PO total when this member has one; only fall back to the inbound-shipment
+        // total for the (rare) case of inbound shipment lines with no corresponding open PO row.
+        // This does NOT change findLatestGatingMemberDate's inbound-shipment-first preference
+        // for the DATE (a booked shipment's date is the more precise near-term estimate) - only
+        // the QUANTITY math changes, since quantity needs the total outstanding commitment, not
+        // just the next booked batch.
+        function calculateKitReceiptQuantity(gatingMembers, memberInventory) {
+            var memberIds = gatingMembers.map(function(member) { return member.memberId; });
 
             if (memberIds.length === 0) {
                 return 0;
             }
 
-            // Get inbound shipments for member items
+            // Get inbound shipments and open POs for member items
             var inboundQty = getInboundShipmentQuantities(memberIds);
             var poQty = getPurchaseOrderQuantities(memberIds);
 
-            // Calculate how many complete kits can be made from expected receipts
+            // Calculate how many complete kits can be made from on-hand + expected receipts,
+            // taking the MIN across every gating (short) member passed in.
             var minKitsFromReceipts = Infinity;
 
-            for (var i = 0; i < kitMembers.length; i++) {
-                var member = kitMembers[i];
-                var expectedQty = (inboundQty[member.memberId] || 0) + (poQty[member.memberId] || 0);
-                var possibleKits = Math.floor(expectedQty / member.memberQuantity);
+            for (var i = 0; i < gatingMembers.length; i++) {
+                var member = gatingMembers[i];
+                var availableQty = (memberInventory && memberInventory[member.memberId]) || 0;
+
+                // Either/or, not sum - see fix note above. hasOwnProperty distinguishes "has an
+                // open PO with quantity 0 outstanding" from "has no open PO row at all", though
+                // in practice getPurchaseOrderQuantities only stores entries where a matching PO
+                // line was found.
+                var hasOpenPO = Object.prototype.hasOwnProperty.call(poQty, member.memberId);
+                var incomingQty = hasOpenPO
+                    ? (poQty[member.memberId] || 0)
+                    : (inboundQty[member.memberId] || 0);
+
+                var possibleKits = Math.floor((availableQty + incomingQty) / member.memberQuantity);
                 minKitsFromReceipts = Math.min(minKitsFromReceipts, possibleKits);
             }
 
@@ -680,37 +757,61 @@ define(['N/search', 'N/format', 'underscore'],
             return quantities;
         }
 
-        // WC-549: called with the multi-member kit's full member list (not just out-of-stock
-        // members) - a kit's NEXT receipt depends on incoming PO/inbound-shipment data for every
-        // member, regardless of what happens to be on hand right now. Parameter name kept for
-        // minimal diff; "outOfStockMembers" here just means "members to look up receipts for".
-        // Moved verbatim from UpdateQuantity_ReceiptDate_SalesOrderDriven.js
-        function findEarliestKitCompletionDate(outOfStockMembers) {
-            var memberIds = outOfStockMembers.map(function(member) { return member.memberId; });
-            var latestReceiptDate = null;
-            var minKitQuantity = Infinity;
+        // WC-549 fix: renamed from findEarliestKitCompletionDate. Called with ONLY the gating
+        // (short) members - a well-stocked member must never gate the kit's next-receipt date.
+        // For each gating member, resolve its raw receipt date exactly like the item-level path
+        // (calculateInventoryItemReceiptFields / findMyReceipts) does - inbound shipment date if
+        // present, else PO date, else none - then run that raw date through the SAME
+        // calcDate(..., 'InvtPart') + checkforWeekend() lead-time/weekend normalization pipeline
+        // before comparing. Takes the MAX (latest) of the normalized dates: the binding
+        // constraint on a multi-member kit is whichever gating component arrives LAST, not
+        // first (this is the semantic flip from "earliest" to "latest" that gives the function
+        // its new name).
+        //
+        // If a gating member has neither an inbound shipment nor an open PO (no raw date at
+        // all), that alone should force the kit-level fallback (today + 90 days, quantity 20) -
+        // signaled back to the caller via hasMissingData rather than silently dropping the
+        // member from the MAX.
+        function findLatestGatingMemberDate(gatingMembers) {
+            var memberIds = gatingMembers.map(function(member) { return member.memberId; });
+            var today = new Date();
+            var latestNormalizedDate = null;
+            var hasMissingData = false;
 
-            // Get inbound shipment dates for these members (prioritize over POs)
+            // Get inbound shipment dates for these members (prioritize over POs), same priority
+            // order as the item-level path
             var inboundDates = getInboundShipmentDates(memberIds);
             var poDates = getPurchaseOrderDates(memberIds);
 
-            // Find the latest date among all members to complete the kit
-            for (var i = 0; i < outOfStockMembers.length; i++) {
-                var member = outOfStockMembers[i];
-                var receiptDate = inboundDates[member.memberId] || poDates[member.memberId];
+            for (var i = 0; i < gatingMembers.length; i++) {
+                var member = gatingMembers[i];
+                var rawDate = null;
+                var dateType = null;
 
-                if (receiptDate && (!latestReceiptDate || receiptDate > latestReceiptDate)) {
-                    latestReceiptDate = receiptDate;
+                if (inboundDates[member.memberId]) {
+                    rawDate = inboundDates[member.memberId];
+                    dateType = "InboundShipment";
+                } else if (poDates[member.memberId]) {
+                    rawDate = poDates[member.memberId];
+                    dateType = "PurchaseOrder";
+                }
+
+                if (!rawDate) {
+                    hasMissingData = true;
+                    continue;
+                }
+
+                var normalizedDate = calcDate(rawDate, today, dateType, 'InvtPart');
+                normalizedDate = checkforWeekend(normalizedDate);
+
+                if (!latestNormalizedDate || normalizedDate > latestNormalizedDate) {
+                    latestNormalizedDate = normalizedDate;
                 }
             }
 
-            // Calculate minimum kit quantity based on expected receipts
-            // This is simplified - could be enhanced with more sophisticated logic
-            minKitQuantity = 1; // Conservative estimate
-
             return {
-                date: latestReceiptDate,
-                quantity: minKitQuantity === Infinity ? 1 : minKitQuantity
+                date: latestNormalizedDate,
+                hasMissingData: hasMissingData
             };
         }
 
@@ -920,7 +1021,7 @@ define(['N/search', 'N/format', 'underscore'],
             calculateKitReceiptQuantity: calculateKitReceiptQuantity,
             getInboundShipmentQuantities: getInboundShipmentQuantities,
             getPurchaseOrderQuantities: getPurchaseOrderQuantities,
-            findEarliestKitCompletionDate: findEarliestKitCompletionDate,
+            findLatestGatingMemberDate: findLatestGatingMemberDate,
             getInboundShipmentDates: getInboundShipmentDates,
             getPurchaseOrderDates: getPurchaseOrderDates,
             findKitsContainingComponents: findKitsContainingComponents,
