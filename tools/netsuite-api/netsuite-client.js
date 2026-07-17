@@ -1,6 +1,40 @@
 /**
  * NetSuite OAuth 2.0 Client Credentials (M2M) API Client for Claude Code
- * Uses JWT assertion signed with EC private key for authentication
+ *
+ * 2026-07-08 FIX (live-data retrieval was broken):
+ * The original client only ever requested an OAuth token with scope
+ * "restlets" and sent every request through the custom RESTlet
+ * (claudeCodeAPI_RL.js, script=customscript_hyc_claude_code_api_rl /
+ * deploy=customdeploy_hyc_claude_code_api_r). That RESTlet deployment no
+ * longer resolves in production - every call returns:
+ *   { "error": { "code": "SSS_INVALID_SCRIPTLET_ID", "message": "That
+ *     Suitelet is invalid, disabled, or no longer exists." } }
+ * This was confirmed with BOTH the scriptid/deployid strings above AND the
+ * numeric ids documented in README.md (2111 / 1) - neither resolves, so the
+ * deployment record itself is missing/deleted/disabled in NetSuite, not a
+ * typo in this file. The OAuth/JWT/M2M setup itself is fine (confirmed:
+ * token exchange succeeds every time, for both scopes below).
+ *
+ * FIX: bypass the broken custom RESTlet entirely and call NetSuite's native
+ * REST Record API / SuiteQL endpoints directly, using an OAuth token with
+ * scope "rest_webservices" instead of "restlets". These are standard
+ * NetSuite platform endpoints (not a custom script), so there is no
+ * deployment record to break:
+ *   - SuiteQL:      POST /services/rest/query/v1/suiteql
+ *   - Record read:  GET  /services/rest/record/v1/{recordType}/{id}
+ * Both were verified working against production account 6511399 (2026-07-08).
+ *
+ * Known gap: the native REST Record API does NOT expose on-hand/available
+ * inventory quantity (no "quantityavailable" field on inventoryitem, and
+ * the SuiteQL `inventorybalance` table only has rows for items that
+ * currently carry a bin/lot balance) and does not support executing an
+ * existing saved search by internal ID (`search.load({id})` equivalent).
+ * Both of those DO still require the custom RESTlet (search.lookupFields /
+ * search.load give the "item" search type's computed
+ * locationquantityavailable column). If you need those, the RESTlet
+ * deployment needs to be found or recreated in NetSuite - see README.md
+ * "Live-data retrieval - 2026-07-08 incident" section for what to check /
+ * what to hand James.
  */
 
 const crypto = require('crypto');
@@ -16,17 +50,21 @@ const CONFIG = {
     accountId: '6511399',
     clientId: '9199cae528a9759f4e8fcd33dde07f79257436116c08b3502cf3df3eecb1b532',
     certificateId: 'l0zS7h1RPMBngCqoaP0gGvxWWWKdV9MJUAZEsqiv9s0',
+    // Legacy custom RESTlet path - BROKEN as of 2026-07-08, kept only so it
+    // can be retried once the deployment is fixed/recreated in NetSuite.
     scriptId: 'customscript_hyc_claude_code_api_rl',
     deployId: 'customdeploy_hyc_claude_code_api_r',
     // Paths to key files (relative to this script)
     privateKeyPath: path.join(__dirname, 'private.pem'),
     // Token endpoint
-    tokenEndpoint: 'https://6511399.suitetalk.api.netsuite.com/services/rest/auth/oauth2/v1/token'
+    tokenEndpoint: 'https://6511399.suitetalk.api.netsuite.com/services/rest/auth/oauth2/v1/token',
+    // Native REST API host (SuiteQL + Record API)
+    restApiHost: '6511399.suitetalk.api.netsuite.com'
 };
 
-// Token cache
-let cachedToken = null;
-let tokenExpiry = null;
+// Token cache (separate per scope, since restlets vs rest_webservices are
+// different grants)
+const tokenCache = {};
 
 // =============================================================================
 // JWT Creation and Signing (RSA-PSS with SHA-256)
@@ -39,7 +77,7 @@ function base64UrlEncode(buffer) {
         .replace(/=/g, '');
 }
 
-function createJWT() {
+function createJWT(scope) {
     const now = Math.floor(Date.now() / 1000);
     const expiry = now + 3600; // 1 hour
 
@@ -52,7 +90,7 @@ function createJWT() {
 
     const payload = {
         iss: CONFIG.clientId,
-        scope: 'restlets',
+        scope,
         aud: CONFIG.tokenEndpoint,
         iat: now,
         exp: expiry
@@ -81,13 +119,14 @@ function createJWT() {
 // OAuth 2.0 Token Management
 // =============================================================================
 
-async function getAccessToken() {
+async function getAccessToken(scope = 'rest_webservices') {
+    const cached = tokenCache[scope];
     // Return cached token if still valid (with 5 minute buffer)
-    if (cachedToken && tokenExpiry && Date.now() < tokenExpiry - 300000) {
-        return cachedToken;
+    if (cached && cached.expiry && Date.now() < cached.expiry - 300000) {
+        return cached.token;
     }
 
-    const jwt = createJWT();
+    const jwt = createJWT(scope);
 
     const body = new URLSearchParams({
         grant_type: 'client_credentials',
@@ -115,11 +154,12 @@ async function getAccessToken() {
                 try {
                     const response = JSON.parse(data);
                     if (response.access_token) {
-                        cachedToken = response.access_token;
-                        // Set expiry (default 1 hour, or use expires_in from response)
                         const expiresIn = response.expires_in || 3600;
-                        tokenExpiry = Date.now() + (expiresIn * 1000);
-                        resolve(cachedToken);
+                        tokenCache[scope] = {
+                            token: response.access_token,
+                            expiry: Date.now() + (expiresIn * 1000)
+                        };
+                        resolve(response.access_token);
                     } else {
                         reject(new Error(`Token error: ${JSON.stringify(response)}`));
                     }
@@ -135,11 +175,67 @@ async function getAccessToken() {
 }
 
 // =============================================================================
-// API Client
+// Native REST API client (SuiteQL + Record API) - WORKING PATH
 // =============================================================================
 
-async function makeRequest(method, body = null) {
-    const accessToken = await getAccessToken();
+function httpsJson(options, body) {
+    return new Promise((resolve, reject) => {
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => {
+                try {
+                    resolve({ statusCode: res.statusCode, body: JSON.parse(data) });
+                } catch (e) {
+                    resolve({ statusCode: res.statusCode, raw: data });
+                }
+            });
+        });
+        req.on('error', reject);
+        if (body) req.write(body);
+        req.end();
+    });
+}
+
+async function executeSuiteQL(query, maxRows = 1000) {
+    const token = await getAccessToken('rest_webservices');
+    const body = JSON.stringify({ q: query });
+    return httpsJson({
+        hostname: CONFIG.restApiHost,
+        path: `/services/rest/query/v1/suiteql?limit=${maxRows}`,
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'transient',
+            'Content-Length': Buffer.byteLength(body)
+        }
+    }, body);
+}
+
+async function getRecord(recordType, recordId, expandSubResources = true) {
+    const token = await getAccessToken('rest_webservices');
+    const qs = expandSubResources ? '?expandSubResources=true' : '';
+    return httpsJson({
+        hostname: CONFIG.restApiHost,
+        path: `/services/rest/record/v1/${recordType}/${recordId}${qs}`,
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        }
+    });
+}
+
+// =============================================================================
+// Legacy custom RESTlet path - BROKEN as of 2026-07-08 (SSS_INVALID_SCRIPTLET_ID)
+// Kept so it can be retried once the deployment is found/fixed in NetSuite.
+// Needed for: search.lookupFields/search.load (locationquantityavailable,
+// saved-search-by-id), createRecord/updateRecord/submitFields (writes).
+// =============================================================================
+
+async function makeRestletRequest(method, body = null) {
+    const accessToken = await getAccessToken('restlets');
 
     const baseUrl = `https://${CONFIG.accountId}.restlets.api.netsuite.com/app/site/hosting/restlet.nl`;
     const fullUrl = `${baseUrl}?script=${CONFIG.scriptId}&deploy=${CONFIG.deployId}`;
@@ -162,11 +258,24 @@ async function makeRequest(method, body = null) {
             let data = '';
             res.on('data', chunk => { data += chunk; });
             res.on('end', () => {
+                let parsed;
                 try {
-                    resolve(JSON.parse(data));
+                    parsed = JSON.parse(data);
                 } catch (e) {
                     resolve({ raw: data, statusCode: res.statusCode });
+                    return;
                 }
+                // Self-diagnosing hint: don't make the caller re-derive "the deployment is
+                // broken" from a bare NetSuite error code every time. See README.md "Restore
+                // checklist" for what to check in NetSuite (script id, deploy id, audience/role).
+                if (parsed && parsed.error && parsed.error.code === 'SSS_INVALID_SCRIPTLET_ID') {
+                    parsed._hint = 'Legacy RESTlet deployment (script=' + CONFIG.scriptId +
+                        ', deploy=' + CONFIG.deployId + ') does not resolve in NetSuite - this is ' +
+                        'NOT an auth problem (token exchange already succeeded to get here). See ' +
+                        'tools/netsuite-api/README.md "Restore checklist" section. Native REST ' +
+                        '(ping/suiteql/getRecord) is unaffected and still works.';
+                }
+                resolve(parsed);
             });
         });
         req.on('error', reject);
@@ -175,20 +284,20 @@ async function makeRequest(method, body = null) {
     });
 }
 
-async function executeSuiteQL(query, maxRows = 1000) {
-    return makeRequest('POST', { action: 'suiteql', query, maxRows });
-}
-
-async function getRecord(recordType, recordId) {
-    return makeRequest('POST', { action: 'getRecord', recordType, recordId });
-}
-
 async function runSearch(params) {
-    return makeRequest('POST', { action: 'search', ...params });
+    return makeRestletRequest('POST', { action: 'search', ...params });
 }
 
 async function lookupFields(recordType, recordId, fields) {
-    return makeRequest('POST', { action: 'lookupFields', recordType, recordId, columns: fields });
+    return makeRestletRequest('POST', { action: 'lookupFields', recordType, recordId, columns: fields });
+}
+
+async function createRecord(recordType, values) {
+    return makeRestletRequest('POST', { action: 'createRecord', recordType, values });
+}
+
+async function updateRecord(recordType, recordId, values) {
+    return makeRestletRequest('POST', { action: 'updateRecord', recordType, recordId, values });
 }
 
 // =============================================================================
@@ -201,12 +310,14 @@ async function main() {
         console.log(`
 Usage: node netsuite-client.js <action> [params]
 
-Actions:
+Actions (native REST API - working):
   ping                              Test connectivity
   suiteql "<query>"                 Execute SuiteQL query
-  getRecord <type> <id>             Get a record
-  lookup <type> <id> <fields...>    Lookup fields
-  search <searchId>                 Run saved search
+  getRecord <type> <id>             Get a record (native REST Record API)
+
+Actions (legacy custom RESTlet - BROKEN, see README):
+  lookup <type> <id> <fields...>    search.lookupFields (locationquantityavailable etc)
+  search <searchId>                 Run saved search by internal id
         `);
         return;
     }
@@ -217,7 +328,7 @@ Actions:
     try {
         switch (action) {
             case 'ping':
-                result = await executeSuiteQL('SELECT 1 as test');
+                result = await executeSuiteQL('SELECT 1 as test FROM dual');
                 break;
             case 'suiteql':
             case 'sql':
@@ -245,6 +356,16 @@ Actions:
     }
 }
 
-module.exports = { CONFIG, executeSuiteQL, getRecord, runSearch, lookupFields, makeRequest };
+module.exports = {
+    CONFIG,
+    getAccessToken,
+    executeSuiteQL,
+    getRecord,
+    runSearch,
+    lookupFields,
+    createRecord,
+    updateRecord,
+    makeRestletRequest
+};
 
 if (require.main === module) main();
