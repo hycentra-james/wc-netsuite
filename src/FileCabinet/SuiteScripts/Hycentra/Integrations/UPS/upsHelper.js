@@ -5,8 +5,8 @@
  * @NModuleScope SameAccount
  */
 
-define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search', 'N/encode', 'N/url', '../../../Concentrus/PackShipTemplate/Con_Lib_Print_Node.js'],
-    function (runtime, record, format, https, error, log, file, search, encode, url, printNodeLib) {
+define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/file', 'N/search', 'N/encode', 'N/url', '../../../Concentrus/PackShipTemplate/Con_Lib_Print_Node.js', '../kitCartonResolver.js'],
+    function (runtime, record, format, https, error, log, file, search, encode, url, printNodeLib, kitCartonResolver) {
         const CONFIG_RECORD_TYPE = 'customrecord_hyc_ups_config';
         const SANDBOX_CONFIG_RECORD_ID = 1; // UPS Sandbox config record ID
         const PRODUCTION_CONFIG_RECORD_ID = 2; // UPS Production config record ID
@@ -1215,9 +1215,19 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                 var cartonWeightMap = {}; // cartonName -> weight
                 if (packshipRecords && packshipRecords.length > 0) {
                     var cartonGroups = groupPackShipByCarton(packshipRecords);
+                    // Kit carton layout for weight fallback (WC-648). This runs after the label was
+                    // created, so never hard-fail here - fall back to calculated weight on any error.
+                    var kitLayout = getKitLayoutSafe(fulfillmentId);
                     for (var cartonName in cartonGroups) {
                         var actualWeight = cartonGroups[cartonName][0].actualWeight || 0;
-                        if (actualWeight > 0) {
+                        // Kit box match is authoritative when present (WC-648 follow-up: the Item/Kit
+                        // record data is correct whenever the matching kit can be found), so attempt it
+                        // first and only fall back to actual scanned / calculated weight when unmatched.
+                        var kitBox = resolveKitCartonSafe(cartonGroups[cartonName], cartonName, kitLayout);
+                        if (kitBox && kitBox.weight > 0) {
+                            cartonWeightMap[cartonName] = kitBox.weight;
+                            log.debug('Carton Weight Map', 'Carton "' + cartonName + '": ' + kitBox.weight + ' lbs (kit carton SKU shipping weight)');
+                        } else if (actualWeight > 0) {
                             cartonWeightMap[cartonName] = actualWeight;
                             log.debug('Carton Weight Map', 'Carton "' + cartonName + '": ' + actualWeight + ' lbs (actual weight from PackShip carton)');
                         } else {
@@ -1290,6 +1300,34 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
             } catch (e) {
                 log.error('Multiple Tracking Error', 'Error updating package tracking numbers: ' + e.message + '\nStack: ' + e.stack);
+            }
+        }
+
+        /**
+         * Build the sold-kit carton layout without throwing (WC-648).
+         * Used on the post-label weight-sync path where a hard-fail must not break tracking.
+         */
+        function getKitLayoutSafe(fulfillmentId) {
+            try {
+                return kitCartonResolver.buildKitBoxDefs(fulfillmentId);
+            } catch (e) {
+                log.error('Kit Layout (weight sync)', 'Fulfillment ' + fulfillmentId + ': ' + e.message + ' - falling back to calculated weight');
+                return { boxDefs: [], kitMemberSet: {}, kitCount: 0 };
+            }
+        }
+
+        /**
+         * Resolve a carton to a kit box without throwing (WC-648).
+         * Used on the post-label weight-sync path only.
+         */
+        function resolveKitCartonSafe(cartonRecords, cartonId, kitLayout) {
+            try {
+                return kitCartonResolver.resolveCartonBox(
+                    kitCartonResolver.getCartonInventoryItemIds(cartonRecords),
+                    kitLayout.boxDefs, kitLayout.kitMemberSet, cartonId);
+            } catch (e) {
+                log.error('Kit Carton Resolve (weight sync)', 'Carton ' + cartonId + ': ' + e.message + ' - falling back to calculated weight');
+                return null;
             }
         }
 
@@ -1854,6 +1892,12 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
 
                     log.debug('buildShipmentPayload', 'Found ' + cartonKeys.length + ' cartons from PackShip records');
 
+                    // Resolve the sold kit(s) carton layout (WC-648). Combination/kit items are packed
+                    // by WMS as component inventory items, but the true box dimensions live on the sold
+                    // kit's carton SKUs (custitem_wc_carton_sku_N). buildKitBoxDefs throws on a
+                    // mis-configured kit so we never print a label with wrong dimensions.
+                    var kitLayout = kitCartonResolver.buildKitBoxDefs(fulfillmentRecord.id);
+
                     for (var c = 0; c < cartonKeys.length; c++) {
                         var cartonId = cartonKeys[c];
                         var cartonRecords = cartonGroups[cartonId];
@@ -1861,8 +1905,24 @@ define(['N/runtime', 'N/record', 'N/format', 'N/https', 'N/error', 'N/log', 'N/f
                         // Check if actual weight is available from PackShip carton record
                         var actualWeight = cartonRecords[0].actualWeight || 0;
 
+                        // Resolve this carton to a kit box definition (null for non-kit cartons;
+                        // throws/hard-fails if a kit carton cannot be uniquely resolved).
+                        var kitBox = kitCartonResolver.resolveCartonBox(
+                            kitCartonResolver.getCartonInventoryItemIds(cartonRecords),
+                            kitLayout.boxDefs, kitLayout.kitMemberSet, cartonId);
+
                         var weight, dimensions;
-                        if (actualWeight > 0) {
+                        if (kitBox) {
+                            // Dimensions come from the sold kit's carton SKU. Weight now PREFERS the
+                            // carton SKU's own shipping weight (the Item/Kit record data is treated as
+                            // authoritative once a kit box match is found), falling back to actual
+                            // scanned weight only if the carton SKU has no weight populated (WC-648 follow-up).
+                            dimensions = kitBox.dims;
+                            weight = kitBox.weight > 0 ? kitBox.weight : (actualWeight > 0 ? actualWeight : 1);
+                            log.audit('Kit Carton Dimensions', 'Carton "' + cartonId + '" -> kit box ' + kitBox.cartonSkuId +
+                                ': ' + dimensions.length + 'x' + dimensions.width + 'x' + dimensions.height +
+                                ', weight ' + weight + ' lbs (' + (kitBox.weight > 0 ? 'carton SKU' : 'actual scanned') + ')');
+                        } else if (actualWeight > 0) {
                             // Use actual weight from carton record, only calculate dimensions
                             weight = actualWeight;
                             dimensions = calculateCartonDimensions(cartonRecords);
