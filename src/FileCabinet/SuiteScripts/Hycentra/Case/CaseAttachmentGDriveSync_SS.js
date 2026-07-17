@@ -23,7 +23,20 @@ define([
     var UPLOAD_API_URL = 'https://www.googleapis.com/upload/drive/v3/files';
     var GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
     var PARENT_FOLDER_ID = '1fE_BLrw3RfmeAMe6zKxoBmNbUeg__y_b'; // Set this to your target Google Drive folder ID
-    
+
+    // WC-682: strongly-consistent cache for Year/Month Drive folder ids, keyed on parentId + folderName.
+    // Google Drive's files.list search index is eventually consistent - when multiple 2026 cases process
+    // in the same run close together, a check-then-create race can produce duplicate Year/Month folders.
+    // This custom record is a NetSuite-side (strongly-consistent) lookup that short-circuits the Drive
+    // search call for the Year/Month levels once a folder id has been resolved once. The Case-number level
+    // is inherently unique per case, so it is NOT cached (no race risk there).
+    var FOLDER_CACHE_RECORD = {
+        TYPE: 'customrecord_hyc_gdrive_folder_cache',
+        FIELD_PARENT_ID: 'custrecord_hyc_gdrive_cache_parent_id',
+        FIELD_FOLDER_NAME: 'custrecord_hyc_gdrive_cache_folder_name',
+        FIELD_FOLDER_ID: 'custrecord_hyc_gdrive_cache_folder_id'
+    };
+
     // Status codes for custevent_hyc_sqi_gdrive_upload_status
     var STATUS = {
         NOT_UPLOADED: 1,
@@ -378,9 +391,9 @@ define([
             log.debug('Root Folder Contents', 'Listing existing folders in root parent: ' + parentFolderId);
             listAllFoldersInParent(parentFolderId, accessToken, 'DEBUG');
 
-            // 1. Get or create Year folder
+            // 1. Get or create Year folder (cache-eligible - see WC-682)
             log.debug('Step 1', 'Processing Year folder: ' + year);
-            var yearFolderResult = getOrCreateFolder(year, parentFolderId, accessToken);
+            var yearFolderResult = getOrCreateFolder(year, parentFolderId, accessToken, true);
             if (!yearFolderResult.success) {
                 return { success: false, error: 'Failed to create/find year folder: ' + yearFolderResult.error };
             }
@@ -391,9 +404,9 @@ define([
             log.debug('Year Folder Contents', 'Listing existing folders in year folder: ' + yearFolderId);
             listAllFoldersInParent(yearFolderId, accessToken, 'DEBUG');
 
-            // 2. Get or create Month folder within Year folder
+            // 2. Get or create Month folder within Year folder (cache-eligible - see WC-682)
             log.debug('Step 2', 'Processing Month folder: ' + month + ' in year folder: ' + yearFolderId);
-            var monthFolderResult = getOrCreateFolder(month, yearFolderId, accessToken);
+            var monthFolderResult = getOrCreateFolder(month, yearFolderId, accessToken, true);
             if (!monthFolderResult.success) {
                 return { success: false, error: 'Failed to create/find month folder: ' + monthFolderResult.error };
             }
@@ -404,9 +417,9 @@ define([
             log.debug('Month Folder Contents', 'Listing existing folders in month folder: ' + monthFolderId);
             listAllFoldersInParent(monthFolderId, accessToken, 'DEBUG');
 
-            // 3. Get or create Case Number folder within Month folder
+            // 3. Get or create Case Number folder within Month folder (NOT cached - unique per case, no race risk)
             log.debug('Step 3', 'Processing Case folder: ' + caseNumber + ' in month folder: ' + monthFolderId);
-            var caseFolderResult = getOrCreateFolder(caseNumber, monthFolderId, accessToken);
+            var caseFolderResult = getOrCreateFolder(caseNumber, monthFolderId, accessToken, false);
             if (!caseFolderResult.success) {
                 return { success: false, error: 'Failed to create/find case folder: ' + caseFolderResult.error };
             }
@@ -427,14 +440,30 @@ define([
         }
     }
 
-    function getOrCreateFolder(folderName, parentId, accessToken) {
+    function getOrCreateFolder(folderName, parentId, accessToken, useCache) {
         try {
-            log.debug('getOrCreateFolder', 'Processing folder: "' + folderName + '" in parent: ' + parentId);
-            
+            log.debug('getOrCreateFolder', 'Processing folder: "' + folderName + '" in parent: ' + parentId + ', useCache: ' + !!useCache);
+
+            // WC-682: for cache-eligible levels (Year, Month), consult the strongly-consistent NetSuite
+            // cache BEFORE hitting Drive's eventually-consistent search index. A cache HIT skips the
+            // Drive API call entirely, which is what closes the race - two cases processed close together
+            // both land on the same definitive answer instead of both missing Drive's not-yet-indexed result.
+            if (useCache) {
+                var cachedFolderId = getCachedFolderId(parentId, folderName);
+                if (cachedFolderId) {
+                    log.audit('getOrCreateFolder', 'Cache HIT for folder: "' + folderName + '" in parent: ' + parentId + ' -> ID: ' + cachedFolderId);
+                    return { success: true, folderId: cachedFolderId };
+                }
+                log.debug('getOrCreateFolder', 'Cache MISS for folder: "' + folderName + '" in parent: ' + parentId + ', falling back to Drive lookup');
+            }
+
             // First, check if folder already exists
             var folderId = checkFolderExists(folderName, parentId, accessToken);
             if (folderId) {
                 log.audit('getOrCreateFolder', 'Using existing folder: "' + folderName + '" with ID: ' + folderId);
+                if (useCache) {
+                    upsertFolderCache(parentId, folderName, folderId);
+                }
                 return { success: true, folderId: folderId };
             }
 
@@ -465,9 +494,10 @@ define([
             if (response.code === 200) {
                 var responseBody = JSON.parse(response.body);
                 log.audit('Folder Creation Success', 'Successfully created folder: "' + folderName + '" with ID: ' + responseBody.id + ' in parent: ' + parentId);
-                
+
                 // Double-check that the folder was actually created by searching for it again
                 var verifyId = checkFolderExists(folderName, parentId, accessToken);
+                var resolvedFolderId = responseBody.id;
                 if (verifyId && verifyId === responseBody.id) {
                     log.debug('Folder Verification', 'Verified folder creation: ' + responseBody.id);
                 } else if (verifyId && verifyId !== responseBody.id) {
@@ -475,38 +505,142 @@ define([
                 } else {
                     log.warn('Folder Verification', 'Could not verify folder creation, but proceeding with created folder ID: ' + responseBody.id);
                 }
-                
-                return { success: true, folderId: responseBody.id };
+
+                // WC-682: UPSERT the resolved id into the cache BEFORE returning, so the next lookup
+                // (even from a concurrent/later execution context) reads a definitive answer from
+                // NetSuite's own strongly-consistent database instead of racing Drive's search index.
+                if (useCache) {
+                    upsertFolderCache(parentId, folderName, resolvedFolderId);
+                }
+
+                return { success: true, folderId: resolvedFolderId };
             } else {
                 var errorMsg = 'Failed to create folder "' + folderName + '": HTTP ' + response.code + ' - ' + response.body;
                 log.error('Folder Creation Failed', errorMsg);
-                
+
                 // Check if the folder might have been created by another process in the meantime
                 log.debug('Retry Check', 'Checking if folder was created by another process...');
                 var retryFolderId = checkFolderExists(folderName, parentId, accessToken);
                 if (retryFolderId) {
                     log.audit('Folder Found on Retry', 'Found folder "' + folderName + '" with ID: ' + retryFolderId + ' (likely created by concurrent process)');
+                    if (useCache) {
+                        upsertFolderCache(parentId, folderName, retryFolderId);
+                    }
                     return { success: true, folderId: retryFolderId };
                 }
-                
+
                 return { success: false, error: errorMsg };
             }
         } catch (e) {
             log.error('getOrCreateFolder Error', 'Error processing folder "' + folderName + '": ' + e.message);
-            
+
             // As a last resort, try to find the folder again in case it was created during the error
             try {
                 var emergencyFolderId = checkFolderExists(folderName, parentId, accessToken);
                 if (emergencyFolderId) {
                     log.audit('Emergency Recovery', 'Found folder "' + folderName + '" with ID: ' + emergencyFolderId + ' during error recovery');
+                    if (useCache) {
+                        upsertFolderCache(parentId, folderName, emergencyFolderId);
+                    }
                     return { success: true, folderId: emergencyFolderId };
                 }
             } catch (recoveryError) {
                 log.error('Emergency Recovery Failed', 'Could not recover folder during error: ' + recoveryError.message);
             }
-            
+
             return { success: false, error: e.message };
         }
+    }
+
+    // ────────────────────────────
+    // WC-682: FOLDER-ID CACHE (custom record customrecord_hyc_gdrive_folder_cache)
+    // ────────────────────────────
+
+    // Looks up a previously-resolved Drive folder id for a given parentId + folderName pair.
+    // Returns the Drive folder id string on a cache hit, or null on a miss (or lookup error - fails
+    // open to the existing checkFolderExists -> createGoogleDriveFolder path, never blocks processing).
+    function getCachedFolderId(parentId, folderName) {
+        try {
+            var cacheSearch = search.create({
+                type: FOLDER_CACHE_RECORD.TYPE,
+                filters: [
+                    [FOLDER_CACHE_RECORD.FIELD_PARENT_ID, search.Operator.IS, parentId],
+                    'and',
+                    [FOLDER_CACHE_RECORD.FIELD_FOLDER_NAME, search.Operator.IS, folderName]
+                ],
+                columns: [FOLDER_CACHE_RECORD.FIELD_FOLDER_ID]
+            });
+
+            var results = cacheSearch.run().getRange({ start: 0, end: 2 });
+
+            if (results.length > 1) {
+                log.warn('getCachedFolderId', 'Found ' + results.length + ' cache rows for parent: ' + parentId + ', folder: "' + folderName + '" - using the first one. Duplicate cache rows should not accumulate; investigate if this recurs.');
+            }
+
+            if (results.length > 0) {
+                var cachedId = results[0].getValue(FOLDER_CACHE_RECORD.FIELD_FOLDER_ID);
+                if (cachedId) {
+                    return cachedId;
+                }
+            }
+
+            return null;
+        } catch (e) {
+            log.error('getCachedFolderId Error', 'Parent: ' + parentId + ', Folder: "' + folderName + '", Error: ' + e.message);
+            return null;
+        }
+    }
+
+    // Upserts the resolved Drive folder id for a parentId + folderName pair. Re-checks for an existing
+    // cache row immediately before inserting (rather than trusting the caller's earlier cache-miss read)
+    // to keep duplicate cache rows from accumulating if two executions resolve the same folder close
+    // together. This is a best-effort narrowing of that window, not a hard uniqueness guarantee - NetSuite
+    // custom records have no native unique-key constraint - but a duplicate cache row is harmless (the
+    // Drive folder itself is not re-created), unlike the original Drive-side race this replaces.
+    function upsertFolderCache(parentId, folderName, driveFolderId) {
+        try {
+            var cacheSearch = search.create({
+                type: FOLDER_CACHE_RECORD.TYPE,
+                filters: [
+                    [FOLDER_CACHE_RECORD.FIELD_PARENT_ID, search.Operator.IS, parentId],
+                    'and',
+                    [FOLDER_CACHE_RECORD.FIELD_FOLDER_NAME, search.Operator.IS, folderName]
+                ],
+                columns: ['internalid']
+            });
+
+            var results = cacheSearch.run().getRange({ start: 0, end: 1 });
+
+            if (results.length > 0) {
+                var existingId = results[0].getValue('internalid');
+                record.submitFields({
+                    type: FOLDER_CACHE_RECORD.TYPE,
+                    id: existingId,
+                    values: buildCacheFieldValues(parentId, folderName, driveFolderId)
+                });
+                log.debug('upsertFolderCache', 'Updated existing cache record ' + existingId + ' for parent: ' + parentId + ', folder: "' + folderName + '" -> ' + driveFolderId);
+                return;
+            }
+
+            var newCacheRecord = record.create({ type: FOLDER_CACHE_RECORD.TYPE });
+            newCacheRecord.setValue({ fieldId: FOLDER_CACHE_RECORD.FIELD_PARENT_ID, value: parentId });
+            newCacheRecord.setValue({ fieldId: FOLDER_CACHE_RECORD.FIELD_FOLDER_NAME, value: folderName });
+            newCacheRecord.setValue({ fieldId: FOLDER_CACHE_RECORD.FIELD_FOLDER_ID, value: driveFolderId });
+            var newId = newCacheRecord.save();
+            log.debug('upsertFolderCache', 'Created new cache record ' + newId + ' for parent: ' + parentId + ', folder: "' + folderName + '" -> ' + driveFolderId);
+        } catch (e) {
+            // Cache writes are best-effort - a failure here must not fail the folder resolution that
+            // already succeeded (Drive already has the correct folder id at this point).
+            log.error('upsertFolderCache Error', 'Parent: ' + parentId + ', Folder: "' + folderName + '", DriveFolderId: ' + driveFolderId + ', Error: ' + e.message);
+        }
+    }
+
+    function buildCacheFieldValues(parentId, folderName, driveFolderId) {
+        var values = {};
+        values[FOLDER_CACHE_RECORD.FIELD_PARENT_ID] = parentId;
+        values[FOLDER_CACHE_RECORD.FIELD_FOLDER_NAME] = folderName;
+        values[FOLDER_CACHE_RECORD.FIELD_FOLDER_ID] = driveFolderId;
+        return values;
     }
 
     function checkFolderExists(folderName, parentId, accessToken) {
@@ -515,7 +649,8 @@ define([
             
             // Escape single quotes in folder name for the query
             var escapedFolderName = folderName.replace(/'/g, "\\'");
-            var query = "name='" + escapedFolderName + "' and parents in '" + parentId + "' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+            // WC-682: Google's documented grammar is `'<id>' in parents`, not `parents in '<id>'`.
+            var query = "name='" + escapedFolderName + "' and '" + parentId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false";
             
             log.debug('checkFolderExists', 'Google Drive Query: ' + query);
 
@@ -560,7 +695,8 @@ define([
         try {
             logLevel = logLevel || 'DEBUG'; // Default to DEBUG level
             
-            var query = "parents in '" + parentId + "' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+            // WC-682: Google's documented grammar is `'<id>' in parents`, not `parents in '<id>'`.
+            var query = "'" + parentId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false";
             
             var response = https.get({
                 url: GOOGLE_DRIVE_API_URL + '/files?q=' + encodeURIComponent(query) + '&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,createdTime,modifiedTime)',

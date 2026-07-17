@@ -1,21 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <deploy>
-    <!-- The original deploy.xml
-    <configuration>
-        <path>~/AccountConfiguration/*</path>
-    </configuration>
+    <!-- WC-682: scoped to ONLY this change - the script fix + its new custom record.
+         Does NOT re-import the existing faq/custitem/fedex objects; those stay untouched
+         in NetSuite. This intentionally narrows the deploy.xml back to a per-change scope
+         instead of the broader faq-wide <objects> block used previously. -->
     <files>
-        <path>~/FileCabinet/*</path>
+        <path>~/FileCabinet/SuiteScripts/Hycentra/Case/CaseAttachmentGDriveSync_SS.js</path>
     </files>
     <objects>
-        <path>~/Objects/*</path>
-    </objects>
-    <translationimports>
-        <path>~/Translations/*</path>
-    </translationimports>
-    -->
-    <!-- This is modified by James -->
-    <objects>
-        <path>~/Objects/faq/*</path>
+        <path>~/Objects/gdrive/customrecord_hyc_gdrive_folder_cache.xml</path>
     </objects>
 </deploy>

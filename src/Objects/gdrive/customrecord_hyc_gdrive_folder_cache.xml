@@ -1,0 +1,79 @@
+<customrecordtype scriptid="customrecord_hyc_gdrive_folder_cache">
+    <allowattachments>T</allowattachments>
+    <allowinlinedetaching>T</allowinlinedetaching>
+    <allowquickadd>F</allowquickadd>
+    <allowuiaccess>T</allowuiaccess>
+    <description>WC-682: strongly-consistent NetSuite-side cache of resolved Google Drive Year/Month
+    folder ids, keyed on parent Drive folder id + folder name. Closes a check-then-create race
+    against Google Drive's eventually-consistent files.list search index in
+    CaseAttachmentGDriveSync_SS.js. See src/FileCabinet/SuiteScripts/Hycentra/Case/WC682_GDriveFolderCache_SETUP.md.</description>
+    <enablekeywords>T</enablekeywords>
+    <enableoptimisticlocking>T</enableoptimisticlocking>
+    <enablesystemnotes>T</enablesystemnotes>
+    <hierarchical>F</hierarchical>
+    <iconbuiltin>T</iconbuiltin>
+    <includeinsearchmenu>T</includeinsearchmenu>
+    <includename>T</includename>
+    <isinactive>F</isinactive>
+    <isordered>F</isordered>
+    <recordname>HYC Google Drive Folder Cache</recordname>
+    <shownotes>T</shownotes>
+    <customrecordcustomfields>
+        <customrecordcustomfield scriptid="custrecord_hyc_gdrive_cache_parent_id">
+            <accesslevel>2</accesslevel>
+            <applyformatting>F</applyformatting>
+            <checkspelling>F</checkspelling>
+            <description>The Google Drive folder id of the parent folder this cache row's folder
+            lives under (root parent id for a Year-level row, or the Year folder's Drive id for a
+            Month-level row). First half of the lookup key used by getCachedFolderId/upsertFolderCache.</description>
+            <displaytype>NORMAL</displaytype>
+            <dynamicdefault></dynamicdefault>
+            <fieldtype>TEXT</fieldtype>
+            <globalsearch>F</globalsearch>
+            <help></help>
+            <ismandatory>T</ismandatory>
+            <label>Drive Parent Folder ID</label>
+            <maxlength>100</maxlength>
+            <searchlevel>2</searchlevel>
+            <showinlist>T</showinlist>
+            <storevalue>T</storevalue>
+        </customrecordcustomfield>
+        <customrecordcustomfield scriptid="custrecord_hyc_gdrive_cache_folder_name">
+            <accesslevel>2</accesslevel>
+            <applyformatting>F</applyformatting>
+            <checkspelling>F</checkspelling>
+            <description>The folder name being cached - a 4-digit year (e.g. 2026) or a 2-digit
+            zero-padded month (e.g. 07). Second half of the lookup key used by
+            getCachedFolderId/upsertFolderCache.</description>
+            <displaytype>NORMAL</displaytype>
+            <dynamicdefault></dynamicdefault>
+            <fieldtype>TEXT</fieldtype>
+            <globalsearch>F</globalsearch>
+            <help></help>
+            <ismandatory>T</ismandatory>
+            <label>Folder Name</label>
+            <maxlength>50</maxlength>
+            <searchlevel>2</searchlevel>
+            <showinlist>T</showinlist>
+            <storevalue>T</storevalue>
+        </customrecordcustomfield>
+        <customrecordcustomfield scriptid="custrecord_hyc_gdrive_cache_folder_id">
+            <accesslevel>2</accesslevel>
+            <applyformatting>F</applyformatting>
+            <checkspelling>F</checkspelling>
+            <description>The resolved Google Drive folder id for parent_id + folder_name - the
+            cached value read back by getCachedFolderId.</description>
+            <displaytype>NORMAL</displaytype>
+            <dynamicdefault></dynamicdefault>
+            <fieldtype>TEXT</fieldtype>
+            <globalsearch>F</globalsearch>
+            <help></help>
+            <ismandatory>T</ismandatory>
+            <label>Drive Folder ID</label>
+            <maxlength>100</maxlength>
+            <searchlevel>2</searchlevel>
+            <showinlist>T</showinlist>
+            <storevalue>T</storevalue>
+        </customrecordcustomfield>
+    </customrecordcustomfields>
+</customrecordtype>
